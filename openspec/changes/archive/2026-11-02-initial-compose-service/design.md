@@ -38,7 +38,7 @@ Each project is a Compose service. `/workspace` is bound to the project, and the
 ### D2: All state under `CLAUDE_CONFIG_DIR`
 The image sets `CLAUDE_CONFIG_DIR=/home/node/.claude`, and the config storage is mounted there. Without it, onboarding, trust, and enablement state lands in `~/.claude.json` outside `~/.claude` and would be lost on container recreation.
 - *Fallback if state still escapes:* mount the storage at the whole home directory, `/home/node`, instead. The spec stays unchanged ("single config location").
-- *Field test (2.1.316, bind-mounted config directory):* the login survived many container restarts, and trust given through `claude` was picked up by a later `remote-control` run. Not yet verified: survival across `docker compose down`/`up` and the exact file location of trust state. The fallback is not needed so far.
+- *Field test (image 0.2.0, Claude Code 2.1.316, config in a host directory):* login, trust, and enablement survive container restarts and `docker compose down`/`up`. Because only the config directory persists across recreation, the trust state lives there too. The fallback is not needed.
 
 ### D3: Thin entrypoint script, env-driven
 `ENTRYPOINT` is a small POSIX shell script:
@@ -76,7 +76,7 @@ The repository ships `compose.example.yaml` with an `x-box` anchor that holds im
 
 ### D7: Spawn mode default `worktree` for Git projects
 On-demand sessions get their own git worktree, so parallel sessions started from the phone do not edit the same files. Projects that are not Git repositories fall back to `same-dir` automatically (D3).
-- *Field test (2.1.316):* the server starts in worktree mode on a Git repository and reports `Capacity: 1/32 · New sessions will be created in an isolated worktree`. The app showed the environment as connected. Not yet verified: starting a new session from the app and the worktree it creates. If the app cannot start sessions, `same-dir` becomes the default for all projects.
+- *Field test (image 0.2.0):* the server starts in worktree mode on a Git repository (`Capacity: 1/32 · New sessions will be created in an isolated worktree`). A new session started from the Claude app gets its own worktree and is named `<CRB_NAME>-<words>`. Two services run side by side as separate environments in the app. Permission prompts for shell commands appear on the phone and block until approved. Without Git, an explicit `CRB_SPAWN=worktree` fails with Claude Code's own error, as specified.
 
 ### D8: Publishing and versioning
 The image has its own semantic version, independent of the Claude Code version, because it bundles more than Claude Code (OpenSpec, base image, entrypoint).
@@ -94,7 +94,7 @@ The image has its own semantic version, independent of the Claude Code version, 
 - [Restart loop before setup is done] → `unless-stopped` restarts an unconfigured service. The entrypoint prints a hint and waits `CRB_RESTART_DELAY` before exiting, so the loop is slow and the hint is readable.
 - [Old sessions keep their auto-generated names] → The prefix default only affects new sessions. The README says to rename old ones with `/rename` or archive them.
 - [Worktrees accumulate inside the project directory] → They are visible on the host. The README documents where they live and how to prune them (`git worktree prune`).
-- [Undocumented behavior: on-demand sessions from the app, several servers on one host] → Verified in the field test (task 1). D7 has a fallback.
+- [Undocumented behavior: on-demand sessions from the app, several servers on one host] → Both verified in the field test with Claude Code 2.1.316. Repeat the check when bumping Claude Code.
 
 ## Migration Plan
 

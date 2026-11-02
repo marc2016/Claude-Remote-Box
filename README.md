@@ -3,8 +3,6 @@
 Run [Claude Code](https://code.claude.com) on your own headless machine in a small Docker Compose service, and drive it from your phone through Remote Control. Permission prompts appear on your phone, and your code never leaves your machine.
 
 > **Unofficial project.** claude-remote-box is not affiliated with, endorsed by, or supported by Anthropic.
->
-> **Early preview.** The first-run flow with the Claude app has not been verified end-to-end yet. Feedback and issues are welcome.
 
 ## Why this one
 
