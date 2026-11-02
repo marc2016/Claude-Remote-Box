@@ -1,0 +1,4 @@
+# Local files created from the quick start
+compose.yaml
+compose.override.yaml
+.env

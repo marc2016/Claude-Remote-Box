@@ -1,0 +1,36 @@
+# Copy to compose.yaml and add one service per project.
+# Each project gets its own container, Remote Control session and config volume.
+
+x-box: &box
+  image: ghcr.io/marc2016/claude-remote-box:2.1.316
+  restart: unless-stopped
+  user: "${UID:-1000}:${GID:-1000}"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  # No ports and no Docker socket: Remote Control only needs outbound HTTPS.
+
+services:
+  my-project:
+    <<: *box
+    environment:
+      CRB_NAME: my-project        # name shown in the Claude app
+      # CRB_SPAWN: worktree       # or same-dir
+      # GIT_AUTHOR_NAME: Your Name
+      # GIT_AUTHOR_EMAIL: you@example.com
+      # GIT_COMMITTER_NAME: Your Name
+      # GIT_COMMITTER_EMAIL: you@example.com
+    volumes:
+      - ~/code/my-project:/workspace
+      - my-project-config:/home/node/.claude
+
+  # another-project:
+  #   <<: *box
+  #   environment:
+  #     CRB_NAME: another-project
+  #   volumes:
+  #     - ~/code/another-project:/workspace
+  #     - another-project-config:/home/node/.claude
+
+volumes:
+  my-project-config:
+  # another-project-config:
