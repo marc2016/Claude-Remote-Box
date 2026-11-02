@@ -1,12 +1,18 @@
 FROM node:26-trixie-slim
 
 ARG CLAUDE_CODE_VERSION=2.1.316
+ARG OPENSPEC_VERSION=1.16.0
+
+LABEL dev.claude-remote-box.claude-code.version="${CLAUDE_CODE_VERSION}" \
+      dev.claude-remote-box.openspec.version="${OPENSPEC_VERSION}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+RUN npm install -g \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+        "@fission-ai/openspec@${OPENSPEC_VERSION}" \
     && npm cache clean --force
 
 # Updates come from a new image tag, never from Claude Code itself.

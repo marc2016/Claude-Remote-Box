@@ -1,4 +1,9 @@
 # Local files created from the quick start
 compose.yaml
+compose.yml
 compose.override.yaml
+compose.override.yml
 .env
+
+# Config directories hold login tokens
+/*/config/

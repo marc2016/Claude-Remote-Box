@@ -1,8 +1,10 @@
 # Copy to compose.yaml and add one service per project.
-# Each project gets its own container, Remote Control session and config volume.
+# Each project gets its own container, Remote Control environment and config directory.
+# Create each config directory before the first start (Docker would create it owned by root):
+#   mkdir -p ./my-project/config && chmod 700 ./my-project/config
 
 x-box: &box
-  image: ghcr.io/marc2016/claude-remote-box:2.1.316
+  image: ghcr.io/marc2016/claude-remote-box:0.2.0
   restart: unless-stopped
   user: "${UID:-1000}:${GID:-1000}"
   cap_drop: [ALL]
@@ -13,15 +15,15 @@ services:
   my-project:
     <<: *box
     environment:
-      CRB_NAME: my-project        # name shown in the Claude app
-      # CRB_SPAWN: worktree       # or same-dir
+      CRB_NAME: my-project        # environment name in the Claude app
+      # CRB_SPAWN: worktree       # default: worktree for Git projects, else same-dir
       # GIT_AUTHOR_NAME: Your Name
       # GIT_AUTHOR_EMAIL: you@example.com
       # GIT_COMMITTER_NAME: Your Name
       # GIT_COMMITTER_EMAIL: you@example.com
     volumes:
       - ~/code/my-project:/workspace
-      - my-project-config:/home/node/.claude
+      - ./my-project/config:/home/node/.claude   # login token: keep it chmod 700
 
   # another-project:
   #   <<: *box
@@ -29,8 +31,4 @@ services:
   #     CRB_NAME: another-project
   #   volumes:
   #     - ~/code/another-project:/workspace
-  #     - another-project-config:/home/node/.claude
-
-volumes:
-  my-project-config:
-  # another-project-config:
+  #     - ./another-project/config:/home/node/.claude
