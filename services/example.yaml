@@ -1,0 +1,22 @@
+# One file per project, listed under `include:` in compose.yaml.
+# add-project.sh writes these files; this one shows the shape.
+# Relative paths resolve against this directory.
+services:
+  my-project:
+    extends:
+      file: ../box.yaml
+      service: box
+    environment:
+      CRB_NAME: "my-project"        # name in the Claude app
+      # CRB_SPAWN: "same-dir"       # default: worktree for Git projects
+      GIT_AUTHOR_NAME: "Your Name"
+      GIT_AUTHOR_EMAIL: "you@example.com"
+      GIT_COMMITTER_NAME: "Your Name"
+      GIT_COMMITTER_EMAIL: "you@example.com"
+    volumes:
+      - "/home/you/code/my-project:/workspace"
+      - "../my-project/config:/home/node/.claude"     # login token: keep it chmod 700
+      - "my-project-browsers:/home/node/.cache/ms-playwright"   # optional, for screenshots
+
+volumes:
+  my-project-browsers: {}

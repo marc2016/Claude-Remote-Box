@@ -28,22 +28,21 @@ Run [Claude Code](https://code.claude.com) on your own headless machine in a sma
 ## Requirements
 
 - A Claude subscription that includes Remote Control (Pro, Max, Ultra, Team, or Enterprise). **API keys and `claude setup-token` tokens do not work** for Remote Control.
-- Docker with Compose v2.
+- Docker with Compose v2. The `add-project.sh` script needs Compose 2.20 or newer, bash, and git on the host.
 - Recommended: each project is a Git repository. Then every session started from the app gets its own git worktree. Other directories work too, with all sessions sharing `/workspace`.
 
 ## Quick start
 
 ```sh
 mkdir claude-remote-box && cd claude-remote-box
-curl -fsSLO https://raw.githubusercontent.com/marc2016/Claude-Remote-Box/main/compose.example.yaml
-mv compose.example.yaml compose.yaml
-printf 'UID=%s\nGID=%s\n' "$(id -u)" "$(id -g)" > .env
-mkdir -p ./my-project/config && chmod 700 ./my-project/config
+curl -fsSLO https://raw.githubusercontent.com/marc2016/Claude-Remote-Box/main/add-project.sh
+chmod +x add-project.sh
+./add-project.sh git@github.com:you/my-project.git
 ```
 
-Edit `compose.yaml`: set `CRB_NAME` and point the `/workspace` bind mount to your project. Create the config directory before the first start, as above: if it is missing, Docker creates it owned by root, and the container cannot write to it. The directory holds your login token, so keep it private.
+The script asks for the service name (also the name in the Claude app), where to clone the repository (default `~/code/<name>`), the spawn mode, an optional browser cache, and the Git identity for Claude's commits. Every question has a default; press Enter to take it. Nothing is changed until you confirm the summary. It then clones the repository, creates `./<name>/config` with mode 700, and writes `compose.yaml`, `box.yaml`, `.env`, and `services/<name>.yaml`. Do not run it as root: the config directory holds your login token and must belong to your user, or the container cannot write to it.
 
-Then run the one-time setup for that service:
+Then run the one-time setup for that service (here `my-project`):
 
 ```sh
 # 1. Log in with your claude.ai account (opens a URL, paste the code back)
@@ -73,7 +72,50 @@ Login, trust, and enablement are stored in `./my-project/config`, so they surviv
 
 ## Adding a project
 
-Every project is its own service with its own config directory:
+Run the script again in the same directory: `./add-project.sh <git-url>`. It checks that the name is not taken, adds one file, and adds one line to `compose.yaml`. Then repeat the one-time setup for the new service. Each project has its own login.
+
+The layout it creates:
+
+```text
+claude-remote-box/
+  compose.yaml            include: [one line per project]
+  box.yaml                shared hardening (image, user, cap_drop, ...), never started itself
+  .env                    UID / GID of your user
+  services/
+    my-project.yaml       extends box, sets CRB_NAME and the mounts
+  my-project/config/      login and settings, mode 700
+```
+
+### By hand
+
+Write `services/another-project.yaml` (paths are relative to `services/`, see [services/example.yaml](services/example.yaml)):
+
+```yaml
+services:
+  another-project:
+    extends:
+      file: ../box.yaml
+      service: box
+    environment:
+      CRB_NAME: "another-project"
+    volumes:
+      - "/home/you/code/another-project:/workspace"
+      - "../another-project/config:/home/node/.claude"
+      - "another-project-browsers:/home/node/.cache/ms-playwright"   # optional, see Screenshots
+
+volumes:
+  another-project-browsers: {}
+```
+
+Add the line `- services/another-project.yaml`, indented by two spaces, below `include:` in `compose.yaml`, then create the config directory before the first start, or Docker creates it owned by root:
+
+```sh
+mkdir -p ./another-project/config && chmod 700 ./another-project/config
+```
+
+### Single-file setup
+
+[compose.example.yaml](compose.example.yaml) keeps everything in one file, with the shared settings as a YAML anchor:
 
 ```yaml
 services:
@@ -90,11 +132,7 @@ volumes:
   another-project-browsers:
 ```
 
-```sh
-mkdir -p ./another-project/config && chmod 700 ./another-project/config
-```
-
-Then repeat the one-time setup for `another-project`. Each project has its own login. To reset a project, stop it and empty its config directory: `docker compose stop another-project && rm -rf ./another-project/config/* ./another-project/config/.[!.]*`.
+Both styles work side by side: the script adds an `include:` key to an existing single-file `compose.yaml` without touching its services. To move an existing service into its own file, copy its block into `services/<name>.yaml`, replace `<<: *box` with the `extends:` block above, prefix relative paths with `../`, remove the block from `compose.yaml`, add the `include:` line, and check with `docker compose config -q`. If your setup has no `.env`, the script does not create one, because that would change the user of the services that already run; it prints a hint instead. To reset a project, stop it and empty its config directory: `docker compose stop another-project && rm -rf ./another-project/config/* ./another-project/config/.[!.]*`.
 
 ### Config in a named volume
 
@@ -161,7 +199,9 @@ Images are tagged with the project version, for example `0.2.0`. Each release pi
 | `claude-2.1.316` | Newest release with this Claude Code version |
 | `latest` | Newest release |
 
-To update, change the tag in `compose.yaml` and run `docker compose pull && docker compose up -d`. The `2.1.316` tag from the very first release stays available but is not updated.
+To update, change the tag in `box.yaml` (or in `compose.yaml` for a single-file setup) and run `docker compose pull && docker compose up -d`.
+
+When releasing: bump the image tag in `compose.example.yaml`, `box.yaml`, and `CRB_VERSION` in `add-project.sh` together. The `2.1.316` tag from the very first release stays available but is not updated.
 
 ## Git workflow
 

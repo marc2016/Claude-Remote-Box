@@ -1,3 +1,5 @@
+# Single-file setup. Easier: add-project.sh creates compose.yaml, box.yaml and
+# one file per project in services/ for you (see README, "Quick start").
 # Copy to compose.yaml and add one service per project.
 # Each project gets its own container, Remote Control environment and config directory.
 # Create each config directory before the first start (Docker would create it owned by root):

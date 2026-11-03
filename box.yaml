@@ -1,0 +1,12 @@
+# Shared base for all project services. Not started itself: each file in
+# services/ extends the `box` service from here. See README, "Adding a project".
+services:
+  box:
+    image: ghcr.io/marc2016/claude-remote-box:0.2.0
+    restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      core: 0                     # no core dumps in /workspace
+    # No ports and no Docker socket: Remote Control only needs outbound HTTPS.
