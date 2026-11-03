@@ -84,6 +84,10 @@ services:
     volumes:
       - ~/code/another-project:/workspace
       - ./another-project/config:/home/node/.claude
+      - another-project-browsers:/home/node/.cache/ms-playwright   # optional, see Screenshots
+
+volumes:
+  another-project-browsers:
 ```
 
 ```sh
@@ -124,9 +128,18 @@ To reset it: `docker compose down another-project && docker volume rm <stack>_an
 
 Any command given to the container replaces the server, for example `docker compose run --rm -it my-project bash`.
 
+## Screenshots
+
+Ask Claude from the phone for a screenshot of your web app, for example "show me the start page on desktop and on a phone". Claude starts the dev server, takes the screenshots with a headless Chromium, and the images appear in the chat.
+
+- Claude uses your project's own Playwright if it has one, otherwise `npx playwright`. The first time, it downloads Chromium for that Playwright version (about 150 MB).
+- Screenshots and helper scripts go to a temporary directory, not into your project, unless you ask for them there.
+- To keep the downloaded browser across `docker compose down` and `up`, mount a named volume at `/home/node/.cache/ms-playwright`, one per project, as in `compose.example.yaml`. Without it, nothing breaks; Chromium is downloaded again when needed. Use a named volume rather than a host directory: Docker creates it with the right permissions for any `UID`. Do not share it between projects.
+- Only Chromium is supported. Device emulation covers phone and tablet views. WebKit and Firefox need more system libraries than the image contains.
+
 ## Your project's toolchain
 
-The image ships Node.js 26 (LTS) on Debian 13, Git, ripgrep, and the [OpenSpec](https://github.com/Fission-AI/OpenSpec) CLI. If Claude needs to build or test something else, extend the image:
+The image ships Node.js 26 (LTS) on Debian 13, Git, ripgrep, the [OpenSpec](https://github.com/Fission-AI/OpenSpec) CLI, and the system libraries and fonts that a Playwright-managed Chromium needs. It contains no browser itself: each project's Playwright version downloads the browser build it expects. If Claude needs to build or test something else, extend the image:
 
 ```dockerfile
 FROM ghcr.io/marc2016/claude-remote-box:0.2.0
@@ -169,6 +182,7 @@ What it does **not** protect (yet):
 
 - **Outbound network is unrestricted.** The config storage holds your claude.ai login token. A successful prompt injection that gets a command approved could send it, or your code, somewhere else. Read permission prompts carefully. An optional egress allowlist is planned.
 - Anything you approve runs with full access to the mounted project.
+- The headless browser runs without its own sandbox (Playwright's default in containers), so the container is the only boundary for page content. Claude can open any URL the network allows, not only your dev server.
 
 ## Troubleshooting
 
@@ -179,6 +193,7 @@ Check `docker compose logs my-project` first. After a failed start, the containe
 - **`Worktree mode requires a git repository`.** `CRB_SPAWN` is set to `worktree`, but `/workspace` is not a Git repository. Check the bind mount path, remove `CRB_SPAWN`, or set it to `same-dir`.
 - **Sessions are named after a random ID.** They were created before the prefix was set. Rename them with `/rename` or archive them.
 - **Permission denied in `/workspace` or in the config directory.** `UID`/`GID` in `.env` do not match the owner of that directory.
+- **Chromium fails with `error while loading shared libraries`.** The project's Playwright needs a library the image does not have yet. Update to a newer image, or extend the image as in "Your project's toolchain". `npx playwright install --with-deps` cannot work in the container, because it needs root.
 
 ## License
 

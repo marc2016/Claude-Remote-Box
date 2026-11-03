@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+# No core dumps: a crashing browser would otherwise drop core.<pid> files into
+# /workspace, where they could end up in a commit. Inherited by every child.
+ulimit -c 0
+
 # Sessions are named <prefix>-<words>, and the default prefix is the hostname
 # (the container ID). Set it before the passthrough: the interactive setup run
 # of `claude remote-control` creates the first session, which keeps its name.
