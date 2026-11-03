@@ -59,6 +59,11 @@ The README gains a "Screenshots" section (ask for it from the phone; works with 
 - [Browser without sandbox renders hostile content] → Same boundary as any command Claude runs: the hardened container. Documented in the security model.
 - [Managed CLAUDE.md conflicts with a project's own instructions] → The text is short and only about screenshots; project instructions take precedence by content, and nothing in it forbids project-specific screenshot workflows.
 
+## Findings
+
+- Task 1.2: `npx playwright@1.64.1 install-deps chromium` succeeds as root in `node:26-trixie-slim` on linux/arm64 (190 packages installed afterwards) and linux/amd64 (192). `PLAYWRIGHT_DEPS_VERSION=1.64.1`; the explicit-list fallback is not needed.
+- Task 1.1 (static part): the Claude Code 2.1.316 linux binary resolves the managed memory file as `<managed dir>/CLAUDE.md`, with `/etc/claude-code` as the managed directory on Linux. Loading in a Remote Control session is still to be confirmed from the phone.
+
 ## Migration Plan
 
 Ships in the next minor release after `guided-setup` (or together with it). Existing users change the tag and run `docker compose pull && docker compose up -d`; nothing else is required. Adding the cache volume is optional. Rollback is the previous tag.

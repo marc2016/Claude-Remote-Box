@@ -139,7 +139,7 @@ Ask Claude from the phone for a screenshot of your web app, for example "show me
 
 ## Your project's toolchain
 
-The image ships Node.js 26 (LTS) on Debian 13, Git, ripgrep, the [OpenSpec](https://github.com/Fission-AI/OpenSpec) CLI, and the system libraries and fonts that a Playwright-managed Chromium needs. It contains no browser itself: each project's Playwright version downloads the browser build it expects. If Claude needs to build or test something else, extend the image:
+The image ships Node.js 26 (LTS) on Debian 13, Git, ripgrep, the [OpenSpec](https://github.com/Fission-AI/OpenSpec) CLI, and the system libraries and fonts that a Playwright-managed Chromium needs. It contains no browser itself: each project's Playwright version downloads the browser build it expects. The Chromium libraries add about 150 MB to the image download (about 400 MB unpacked). If Claude needs to build or test something else, extend the image:
 
 ```dockerfile
 FROM ghcr.io/marc2016/claude-remote-box:0.2.0

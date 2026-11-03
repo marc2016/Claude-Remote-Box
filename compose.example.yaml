@@ -9,6 +9,8 @@ x-box: &box
   user: "${UID:-1000}:${GID:-1000}"
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
+  ulimits:
+    core: 0                       # no core dumps in /workspace, also for `exec` shells
   # No ports and no Docker socket: Remote Control only needs outbound HTTPS.
 
 services:
@@ -24,6 +26,8 @@ services:
     volumes:
       - ~/code/my-project:/workspace
       - ./my-project/config:/home/node/.claude   # login token: keep it chmod 700
+      # Optional: keeps browsers for screenshots across recreation (one volume per project)
+      - my-project-browsers:/home/node/.cache/ms-playwright
 
   # another-project:
   #   <<: *box
@@ -32,3 +36,8 @@ services:
   #   volumes:
   #     - ~/code/another-project:/workspace
   #     - ./another-project/config:/home/node/.claude
+  #     - another-project-browsers:/home/node/.cache/ms-playwright
+
+volumes:
+  my-project-browsers:
+  # another-project-browsers:
