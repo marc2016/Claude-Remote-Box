@@ -18,6 +18,7 @@ if [ -z "${CRB_NAME:-}" ]; then
 fi
 
 cd /workspace
+crb_banner
 echo "claude-remote-box setup for '$CRB_NAME' (3 steps)"
 
 # 1. Login

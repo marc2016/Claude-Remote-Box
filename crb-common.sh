@@ -26,6 +26,26 @@ crb_spawn_mode() {
     fi
 }
 
+# Clawd, the Claude Code mascot, as a greeting. Orange on a terminal,
+# plain when piped or when NO_COLOR is set.
+crb_banner() {
+    _crb_on='' _crb_off=''
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+        _crb_on=$(printf '\033[38;5;173m') _crb_off=$(printf '\033[0m')
+    fi
+    printf '\n%s' "$_crb_on"
+    printf '%s\n' \
+        '    ████████████████' \
+        '    ████  ████  ████' \
+        '    ████  ████  ████' \
+        '  ████████████████████' \
+        '  ████████████████████' \
+        '    ████████████████' \
+        '    ██  ██    ██  ██' \
+        '    ██  ██    ██  ██'
+    printf '%s\n' "$_crb_off"
+}
+
 crb_logged_in() {
     [ -f "$CLAUDE_CONFIG_DIR/.credentials.json" ]
 }
