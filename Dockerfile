@@ -42,8 +42,15 @@ RUN git config --system --add safe.directory '*' \
 # Managed CLAUDE.md: applies to every session, read-only for the container user.
 COPY claude-managed.md /etc/claude-code/CLAUDE.md
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod 0755 /etc/claude-code /usr/local/bin/entrypoint.sh \
-    && chmod 0644 /etc/claude-code/CLAUDE.md
+COPY setup.sh /usr/local/bin/setup
+COPY crb-common.sh /usr/local/lib/crb/common.sh
+RUN chmod 0755 /etc/claude-code /usr/local/bin/entrypoint.sh /usr/local/bin/setup /usr/local/lib/crb \
+    && chmod 0644 /etc/claude-code/CLAUDE.md /usr/local/lib/crb/common.sh
+
+# Healthy only while the Remote Control server runs; the entrypoint writes its
+# current phase (waiting-config, waiting-setup, running, restarting) there.
+HEALTHCHECK --interval=30s --start-period=10s \
+    CMD test "$(cat /tmp/crb-state 2>/dev/null)" = running
 
 USER node
 WORKDIR /workspace

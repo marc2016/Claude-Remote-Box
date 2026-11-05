@@ -45,24 +45,33 @@ The script asks for the service name (also the name in the Claude app), where to
 Then run the one-time setup for that service (here `my-project`):
 
 ```sh
-# 1. Log in with your claude.ai account (opens a URL, paste the code back)
-docker compose run --rm -it my-project claude auth login
-
-# 2. Start Claude once, accept "Do you trust the files in this folder?", then type /exit
-docker compose run --rm -it my-project claude
-
-# 3. Start the server once, answer "Enable Remote Control?" with y,
-#    wait for the session URL, then press Ctrl-C
-docker compose run --rm -it my-project claude remote-control
-
-# 4. Run it in the background
-docker compose up -d
-docker compose logs -f my-project
+docker compose up -d my-project
+docker compose exec -it my-project setup
 ```
 
-Open the Claude app, tap **Code**, and look for `my-project` (computer icon with a green dot).
+The service waits for setup instead of failing, so `up -d` can come first. `setup` runs three steps and explains each one:
 
-Login, trust, and enablement are stored in `./my-project/config`, so they survive `docker compose down` and `up`. Back up that directory to keep the setup.
+1. **Login** with your claude.ai account: it shows a URL, you log in in any browser and paste the code back. Skipped if already logged in.
+2. **Workspace trust**: Claude starts once; answer "Yes, I trust this folder", then type `/exit`. Skipped if already accepted.
+3. **Enable Remote Control**: the server starts once; answer "Enable Remote Control?" with `y`, wait for "Connected" or the session URL, then press Ctrl-C. Ctrl-C ends only this step.
+
+The waiting service starts its server a few seconds later; `docker compose ps` shows it as healthy. Open the Claude app, tap **Code**, and look for `my-project` (computer icon with a green dot).
+
+Login, trust, and enablement are stored in `./my-project/config`, so they survive `docker compose down` and `up`. Back up that directory to keep the setup. Running `setup` again is harmless: it skips what is already done.
+
+If the service is not running, run setup in a one-off container instead: `docker compose run --rm -it my-project setup`, then `docker compose up -d my-project`.
+
+### Manual setup
+
+These are the steps that `setup` runs:
+
+```sh
+docker compose run --rm -it my-project claude auth login       # 1. login
+docker compose run --rm -it my-project claude                  # 2. accept trust, then /exit
+docker compose run --rm -it my-project claude remote-control   # 3. answer y, wait for Connected, Ctrl-C
+```
+
+After these, the service still waits until `setup` has marked the setup as complete, unless login and trust were present when the container started (see "Upgrading to 0.3.0").
 
 ## Names in the Claude app
 
@@ -201,6 +210,10 @@ Images are tagged with the project version, for example `0.2.0`. Each release pi
 
 To update, change the tag in `box.yaml` (or in `compose.yaml` for a single-file setup) and run `docker compose pull && docker compose up -d`.
 
+### Upgrading to 0.3.0
+
+From 0.3.0 on, a service without completed setup waits instead of restarting, and `setup` replaces the three manual steps. Existing services need nothing: if the config already holds a login and the workspace trust when the container starts, the server starts directly. If it waits after the update, run `docker compose exec -it <service> setup` once.
+
 When releasing: bump the image tag in `compose.example.yaml`, `box.yaml`, and `CRB_VERSION` in `add-project.sh` together. The `2.1.316` tag from the very first release stays available but is not updated.
 
 ## Git workflow
@@ -228,8 +241,13 @@ What it does **not** protect (yet):
 
 Check `docker compose logs my-project` first. After a failed start, the container waits `CRB_RESTART_DELAY` seconds before it restarts.
 
-- **`You must be logged in to use Remote Control`.** Step 1 of the quick start is missing.
-- **`Workspace not trusted`.** Step 2 was skipped, or the trust question was answered with "no". Run it again.
+- **`waiting for setup. Run on the host: docker compose exec -it <service> setup`.** Setup is not complete yet. Run it; the server starts by itself afterwards.
+- **`cannot write to the config directory /home/node/.claude (owner 0:0, container runs as 1000:1000)`.** The config directory on the host belongs to another user, usually root because Docker created it. Run the printed `chown` on the host with the real path, for example `sudo chown -R 1000:1000 ./my-project/config`. The container continues by itself.
+- **`server exited with status N, restarting in 30s` and `if this repeats, run setup again`.** The server failed after setup, for example because "Enable Remote Control?" was never answered or the login expired. Run `setup` again.
+- **`You must be logged in to use Remote Control`.** The login is missing or expired. Run `setup` again.
+- **`Workspace not trusted`.** The trust question was answered with "no". Run `setup` again.
+- **`CRB_NAME is not set`.** The service has no `CRB_NAME` in its `environment:`. Add it; `setup` reports the same.
+- **The service shows as unhealthy.** It is waiting for setup or for a writable config directory; the log says which.
 - **`Worktree mode requires a git repository`.** `CRB_SPAWN` is set to `worktree`, but `/workspace` is not a Git repository. Check the bind mount path, remove `CRB_SPAWN`, or set it to `same-dir`.
 - **Sessions are named after a random ID.** They were created before the prefix was set. Rename them with `/rename` or archive them.
 - **Permission denied in `/workspace` or in the config directory.** `UID`/`GID` in `.env` do not match the owner of that directory.

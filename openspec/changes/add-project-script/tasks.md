@@ -16,7 +16,7 @@
 ## 3. Tests and CI
 
 - [x] 3.1 Write `tests/add-project.test.sh` (D7) with a local bare repo as URL, covering: all defaults, invalid and duplicate names, declined summary, existing checkout reuse, empty directory, existing single-file setup with `x-box`, rollback, generated service hardening via `docker compose config <name>`. Verify all cases pass locally.
-- [ ] 3.2 Add a CI workflow that runs `shellcheck` and the test on pull requests. Verify it passes on the branch.
+- [x] 3.2 Add a CI workflow that runs `shellcheck` and the test on pull requests. Verify it passes on the branch.
 
 ## 4. Documentation
 

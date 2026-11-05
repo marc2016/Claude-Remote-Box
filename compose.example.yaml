@@ -4,6 +4,8 @@
 # Each project gets its own container, Remote Control environment and config directory.
 # Create each config directory before the first start (Docker would create it owned by root):
 #   mkdir -p ./my-project/config && chmod 700 ./my-project/config
+# Then start it and run the guided setup:
+#   docker compose up -d my-project && docker compose exec -it my-project setup
 
 x-box: &box
   image: ghcr.io/marc2016/claude-remote-box:0.2.0
@@ -21,6 +23,7 @@ services:
     environment:
       CRB_NAME: my-project        # environment name in the Claude app
       # CRB_SPAWN: worktree       # default: worktree for Git projects, else same-dir
+      # CRB_EXTRA_ARGS: --permission-mode auto   # fewer prompts; default asks before most actions
       # GIT_AUTHOR_NAME: Your Name
       # GIT_AUTHOR_EMAIL: you@example.com
       # GIT_COMMITTER_NAME: Your Name
