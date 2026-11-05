@@ -46,8 +46,9 @@ D="$WORK/t-defaults"; mkdir -p "$D"
 # name, dir, spawn, browsers, git name, git email, confirm
 run "$D" '\n\n\n\n\n\ny\n' "$REPO"
 check "exit 0" '[ "$(rc)" -eq 0 ]'
-check "summary shows defaults" 'out | grep -q "Service:      flashagenda" && out | grep -q "$HOME/code/flashagenda  <- $REPO" && out | grep -q "Spawn-Modus:  worktree" && out | grep -q "Test User <test@example.com>" && out | grep -q "Volume flashagenda-browsers"'
-check "repository cloned" '[ -d "$HOME/code/flashagenda/.git" ]'
+check "summary shows defaults" 'out | grep -q "Service:      flashagenda" && out | grep -q "$D/flashagenda/workspace  <- $REPO" && out | grep -q "Spawn-Modus:  worktree" && out | grep -q "Test User <test@example.com>" && out | grep -q "Volume flashagenda-browsers"'
+check "repository cloned" '[ -d "$D/flashagenda/workspace/.git" ]'
+check "workspace mount is relative" 'grep -q "\"../flashagenda/workspace:/workspace\"" "$D/services/flashagenda.yaml"'
 check "config dir mode 700" '[ "$(ls -ld "$D/flashagenda/config" | cut -c1-10)" = "drwx------" ]'
 check "base files created" '[ -f "$D/compose.yaml" ] && [ -f "$D/box.yaml" ] && [ -f "$D/.env" ] && [ -f "$D/services/flashagenda.yaml" ]'
 check ".env has host UID/GID" 'grep -qx "UID=$(id -u)" "$D/.env" && grep -qx "GID=$(id -g)" "$D/.env"'
@@ -84,6 +85,13 @@ check "exit 0" '[ "$(rc)" -eq 0 ]'
 check "not cloned" '[ ! -d "$WORK/existing/.git" ] && [ -f "$WORK/existing/marker" ]'
 check "mounted as workspace" '(cd "$D" && docker compose config flashagenda) | grep -q "source: $WORK/existing"'
 
+echo "Project folder around the config is refused"
+D="$WORK/t-nest"; mkdir -p "$D"
+# name, dir: current dir, own name dir, config dir, then default; spawn, browsers, git name, git email, decline
+run "$D" "nest\n.\n./nest\nnest/config/x\n\n\n\n\n\nn\n" "$REPO"
+check "three paths refused" '[ "$(out | grep -c "dürfen nicht ineinander liegen")" -eq 3 ]'
+check "default accepted after" 'out | grep -q "$D/nest/workspace  <- $REPO"'
+
 echo "Existing single-file setup with x-box"
 D="$WORK/t-single"; mkdir -p "$D"; cp "$EXAMPLE" "$D/compose.yaml"; printf 'UID=1000\nGID=1000\n' >"$D/.env"
 old=$(cd "$D" && docker compose config my-project)
@@ -117,7 +125,7 @@ run "$D" 'rb\n\n\n\n\n\ny\n' "$REPO"
 check "exit non-zero" '[ "$(rc)" -ne 0 ]'
 check "compose.yaml restored exactly" 'cmp -s "$D/compose.yaml" "$WORK/compose.orig"'
 check "service file removed" '[ ! -e "$D/services/rb.yaml" ]'
-check "clone and config kept" '[ -d "$HOME/code/rb/.git" ] && [ -d "$D/rb/config" ]'
+check "clone and config kept" '[ -d "$D/rb/workspace/.git" ] && [ -d "$D/rb/config" ]'
 
 echo "Refuses root and old Compose"
 FAKE="$WORK/fake"; mkdir -p "$FAKE"

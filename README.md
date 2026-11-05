@@ -20,7 +20,7 @@ Run [Claude Code](https://code.claude.com) on your own headless machine in a sma
  your machine                                            |
    +-- service my-project ------------------------------+
    |   claude remote-control --name my-project          |
-   |   /workspace          <- ~/code/my-project (bind)  |
+   |   /workspace          <- ./my-project/workspace    |
    |   /home/node/.claude  <- ./my-project/config (bind)|
    +----------------------------------------------------+
 ```
@@ -40,7 +40,7 @@ chmod +x add-project.sh
 ./add-project.sh git@github.com:you/my-project.git
 ```
 
-The script asks for the service name (also the name in the Claude app), where to clone the repository (default `~/code/<name>`), the spawn mode, an optional browser cache, and the Git identity for Claude's commits. Every question has a default; press Enter to take it. Nothing is changed until you confirm the summary. It then clones the repository, creates `./<name>/config` with mode 700, and writes `compose.yaml`, `box.yaml`, `.env`, and `services/<name>.yaml`. Do not run it as root: the config directory holds your login token and must belong to your user, or the container cannot write to it.
+The script asks for the service name (also the name in the Claude app), where to clone the repository (default `./<name>/workspace`, next to its config), the spawn mode, an optional browser cache, and the Git identity for Claude's commits. Every question has a default; press Enter to take it. Nothing is changed until you confirm the summary. It then clones the repository, creates `./<name>/config` with mode 700, and writes `compose.yaml`, `box.yaml`, `.env`, and `services/<name>.yaml`. Do not run it as root: the config directory holds your login token and must belong to your user, or the container cannot write to it.
 
 Then run the one-time setup for that service (here `my-project`):
 
@@ -92,7 +92,9 @@ claude-remote-box/
   .env                    UID / GID of your user
   services/
     my-project.yaml       extends box, sets CRB_NAME and the mounts
-  my-project/config/      login and settings, mode 700
+  my-project/
+    config/               login and settings, mode 700
+    workspace/            the cloned repository, mounted as /workspace
 ```
 
 ### By hand

@@ -122,11 +122,19 @@ done
 
 reuse_dir=0
 while :; do
-  # shellcheck disable=SC2088  # literal ~ is shown as default and expanded below
-  ask dir "Zielordner für das Repository" "~/code/$name"
+  # The default keeps the checkout next to its config: ./<name>/workspace.
+  ask dir "Zielordner für das Repository" "./$name/workspace"
   dir=${dir/#\~/$HOME}
+  if [ "$dir" = . ]; then dir=$PWD; fi
+  while [[ "$dir" == ./* ]]; do dir=${dir#./}; done
   case "$dir" in /*) ;; *) dir="$PWD/$dir" ;; esac
   dir=${dir%/}
+  # The config holds the login token: it must not be visible in /workspace.
+  cfg="$PWD/$name/config"
+  if [ "$dir" = "$cfg" ] || [[ "$dir" == "$cfg/"* || "$cfg" == "$dir/"* ]]; then
+    warn "Projektordner und Config-Ordner ($cfg) dürfen nicht ineinander liegen (Login-Token)."
+    continue
+  fi
   if [[ "$dir" == *:* ]]; then
     warn "Der Pfad darf keinen Doppelpunkt enthalten."
     continue
@@ -267,7 +275,12 @@ mkdir -p services
     echo "      GIT_COMMITTER_EMAIL: $(yaml_str "$git_email")"
   fi
   echo "    volumes:"
-  echo "      - $(yaml_str "$dir:/workspace")"
+  # Paths inside this directory stay relative, so the setup can be moved.
+  if [[ "$dir" == "$PWD/"* ]]; then
+    echo "      - $(yaml_str "../${dir#"$PWD"/}:/workspace")"
+  else
+    echo "      - $(yaml_str "$dir:/workspace")"
+  fi
   echo "      - \"../$name/config:/home/node/.claude\"   # login token"
   if [ "$browsers" -eq 1 ]; then
     echo "      - \"$name-browsers:/home/node/.cache/ms-playwright\""

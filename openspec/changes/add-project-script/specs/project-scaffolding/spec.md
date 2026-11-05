@@ -7,11 +7,11 @@ An interactive host script that adds a project to a claude-remote-box installati
 ## ADDED Requirements
 
 ### Requirement: Interactive prompts with defaults
-The script SHALL ask for its inputs interactively, show a default in square brackets where one exists, and accept the default on empty input. It SHALL ask for: the Git URL (optionally given as first argument instead), the service name, the clone directory, the spawn mode as a numbered choice, whether to add a browser cache, and the Git author name and email. Defaults SHALL be: the service name derived from the repository name, the clone directory `~/code/<service name>`, worktree spawn mode, a browser cache, and the host's global Git identity.
+The script SHALL ask for its inputs interactively, show a default in square brackets where one exists, and accept the default on empty input. It SHALL ask for: the Git URL (optionally given as first argument instead), the service name, the clone directory, the spawn mode as a numbered choice, whether to add a browser cache, and the Git author name and email. Defaults SHALL be: the service name derived from the repository name, the clone directory `./<service name>/workspace`. The clone directory SHALL NOT contain the config directory or lie inside it, worktree spawn mode, a browser cache, and the host's global Git identity.
 
 #### Scenario: Accept all defaults
 - **WHEN** the user starts the script with `git@github.com:marc2016/FlashAgenda.git` as argument and presses Enter at every prompt
-- **THEN** the summary shows service `flashagenda`, clone directory `~/code/flashagenda`, spawn mode worktree, a browser cache, and the host's Git name and email
+- **THEN** the summary shows service `flashagenda`, clone directory `./flashagenda/workspace`, spawn mode worktree, a browser cache, and the host's Git name and email
 
 #### Scenario: URL as argument
 - **WHEN** the Git URL is given as first argument
