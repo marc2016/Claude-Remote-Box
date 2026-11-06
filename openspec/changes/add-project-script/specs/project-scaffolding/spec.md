@@ -56,6 +56,10 @@ If the clone directory already exists, the script SHALL clone into it when it is
 - **WHEN** the clone directory exists and is empty
 - **THEN** the script clones into it without asking
 
+#### Scenario: Empty directory left by Docker
+- **WHEN** the clone directory or the config directory exists, is empty, and is not writable by the user (typically created as root by Docker for a missing bind-mount source)
+- **THEN** the script removes it after the summary is confirmed and creates it anew, owned by the user
+
 #### Scenario: Reuse declined
 - **WHEN** the clone directory holds other content and the user declines to use it
 - **THEN** the script asks for another clone directory

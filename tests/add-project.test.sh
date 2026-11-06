@@ -102,6 +102,13 @@ run "$D" 'hollow\n\n\n\n\n\ny\n' "$REPO"
 check "exit 0" '[ "$(rc)" -eq 0 ]'
 check "cloned into it" '[ -d "$D/hollow/workspace/.git" ] && ! out | grep -q "Ohne Klonen"'
 
+echo "Empty directory without write access (left by Docker) is replaced"
+D="$WORK/t-docker"; mkdir -p "$D/dock/workspace" "$D/dock/config"; chmod 555 "$D/dock/workspace" "$D/dock/config"
+run "$D" 'dock\n\n\n\n\n\ny\n' "$REPO"
+check "exit 0" '[ "$(rc)" -eq 0 ] || { out; false; }'
+check "removed and cloned" 'out | grep -q "vermutlich von Docker angelegt" && [ -d "$D/dock/workspace/.git" ] && [ -w "$D/dock/workspace" ]'
+check "empty config replaced" '[ "$(ls -ld "$D/dock/config" | cut -c1-10)" = "drwx------" ]'
+
 echo "Declined reuse asks for another directory"
 D="$WORK/t-other"; mkdir -p "$D/busy/workspace"; echo x >"$D/busy/workspace/file"
 # name, dir (default, busy), decline reuse, other dir, spawn, browsers, git name, git email, confirm

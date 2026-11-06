@@ -141,8 +141,8 @@ while :; do
   break
 done
 
-reuse_dir=0
 while :; do
+  reuse_dir=0 clear_empty=0
   # The default keeps the checkout next to its config: ./<name>/workspace.
   ask dir "Zielordner für das Repository" "./$name/workspace"
   dir=${dir/#\~/$HOME}
@@ -165,8 +165,18 @@ while :; do
       warn "$dir existiert und ist kein Ordner."
       continue
     fi
-    if [ -z "$(ls -A "$dir" 2>/dev/null)" ] && [ -r "$dir" ] && [ -w "$dir" ]; then
-      echo "   $dir ist leer, das Repository wird hineingeklont."
+    if [ -r "$dir" ] && [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+      if [ -w "$dir" ]; then
+        echo "   $dir ist leer, das Repository wird hineingeklont."
+      else
+        # Typically created as root by Docker for a bind mount whose source
+        # was missing. An empty directory can be removed with write access to
+        # its parent alone.
+        owner=$(ls -ld "$dir" | awk '{print $3}')
+        echo "   $dir ist leer, gehört aber $owner (vermutlich von Docker angelegt)."
+        echo "   Er wird vor dem Klonen entfernt."
+        clear_empty=1
+      fi
     elif same_repo "$dir" "$url"; then
       echo "   $dir enthält dieses Repository schon und wird ohne Klonen verwendet."
       reuse_dir=1
@@ -245,13 +255,20 @@ if [ "$reuse_dir" -eq 1 ]; then
 else
   echo "📥 1/4 Klone Repository..."
   mkdir -p "$(dirname "$dir")"
+  if [ "$clear_empty" -eq 1 ] && ! rmdir "$dir"; then
+    die "$dir lässt sich nicht entfernen. Stoppe den Container, der ihn mountet, und entferne ihn: sudo rmdir $dir"
+  fi
   git clone "$url" "$dir" || die "Klonen fehlgeschlagen. Es wurde nichts weiter angelegt."
 fi
 
 echo ""
 echo "📁 2/4 Lege Config-Ordner an..."
+# An empty config directory created as root by Docker is replaced.
+if [ -d "$config_dir" ] && [ ! -w "$config_dir" ] && [ -r "$config_dir" ] && [ -z "$(ls -A "$config_dir")" ]; then
+  rmdir "$config_dir" || die "$config_dir gehört nicht dir. Stoppe den Container und korrigiere es: sudo rm -r $PWD/$config_dir"
+fi
 mkdir -p "$config_dir"
-chmod 700 "$config_dir"
+chmod 700 "$config_dir" || die "$config_dir gehört nicht dir: sudo chown -R $(id -u):$(id -g) $PWD/$config_dir"
 
 echo ""
 echo "✍️  3/4 Trage Service ein..."
