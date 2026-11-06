@@ -288,6 +288,49 @@ D="$WORK/t-updnone"; mkdir -p "$D"
 update "$D" ''
 check "exit non-zero naming compose.yaml" '[ "$(rc)" -ne 0 ] && out | grep -q "keine compose.yaml"'
 
+# dashboard DIR ANSWERS: runs `crb dashboard` (real docker compose config, nothing is pulled).
+dashboard() {
+  local dir=$1 answers=$2
+  (cd "$dir" && printf '%b' "$answers" | "$SCRIPT" dashboard) >"$WORK/out" 2>&1
+  echo $? >"$WORK/rc"
+}
+
+echo "Dashboard: added to an installation with two boxes"
+D="$WORK/t-dash"; mkdir -p "$D"
+run "$D" 'd1\n\n\n\n\n\n\n\ny\n' "$REPO"
+run "$D" 'd2\n\n\n3\nn\nn\n\n\ny\n' "$REPO"
+before=$(snapshot "$D")
+dashboard "$D" 'n\n'
+check "declined: exit 0, nothing changed" '[ "$(rc)" -eq 0 ] && out | grep -q "nichts geändert" && [ "$(snapshot "$D")" = "$before" ]'
+dashboard "$D" 'y\n'
+check "exit 0" '[ "$(rc)" -eq 0 ] || { out; false; }'
+check "token in .env, service file, include" 'grep -qE "^CRB_STATUS_TOKEN=[A-Za-z0-9]{32}$" "$D/.env" && [ -f "$D/services/crb-dashboard.yaml" ] && grep -q "services/crb-dashboard.yaml" "$D/compose.yaml"'
+TOKEN=$(sed -n "s/^CRB_STATUS_TOKEN=//p" "$D/.env")
+check "boxes wired with URL and token" '(cd "$D" && docker compose config d1) | grep -q "CRB_STATUS_URL: http://crb-dashboard:8080/api/ingest" && (cd "$D" && docker compose config d2) | grep -q "CRB_STATUS_TOKEN: $TOKEN" && (cd "$D" && docker compose config d1) | grep -q "CRB_EXTRA_ARGS\|CRB_NAME: d1"'
+CFG=$(cd "$D" && docker compose config crb-dashboard)
+check "dashboard: loopback port, one mount, hardened, config valid" 'echo "$CFG" | grep -q "host_ip: 127.0.0.1" && echo "$CFG" | grep -q "published: \"8080\"" && [ "$(echo "$CFG" | grep -c "target: /")" -eq 1 ] && echo "$CFG" | grep -q "target: /data" && echo "$CFG" | grep -q -- "- ALL" && (cd "$D" && docker compose config -q)'
+check "CRB_DASHBOARD_BIND honored" '(cd "$D" && CRB_DASHBOARD_BIND=0.0.0.0:9000 docker compose config crb-dashboard) | grep -q "published: \"9000\""'
+before=$(snapshot "$D")
+dashboard "$D" ''
+check "second run: already present, nothing changed" '[ "$(rc)" -eq 0 ] && out | grep -q "schon vorhanden" && [ "$(snapshot "$D")" = "$before" ]'
+
+echo "Dashboard: single-file setup gets a hint"
+D="$WORK/t-dashsingle"; mkdir -p "$D"; cp "$EXAMPLE" "$D/compose.yaml"
+dashboard "$D" ''
+check "hint, file untouched" '[ "$(rc)" -eq 0 ] && out | grep -q "Von Hand eintragen" && cmp -s "$EXAMPLE" "$D/compose.yaml"'
+
+echo "Update: reconciles the status variables"
+D="$WORK/t-dash"
+sed -i.bak -e "/CRB_STATUS_URL/d" -e "/CRB_STATUS_TOKEN/d" "$D/box.yaml"; rm -f "$D/box.yaml.bak"
+check "precondition: variables removed" '! grep -q CRB_STATUS "$D/box.yaml"'
+# status y; d1: mode (default, keep), phone exists; d2: mode present, phone y; apply y; recreate n
+update "$D" '\n\n\ny\nn\n'
+check "exit 0" '[ "$(rc)" -eq 0 ] || { out; false; }'
+check "variables back in every box, all boxes listed for recreate" '(cd "$D" && docker compose config d1) | grep -q "CRB_STATUS_URL" && (cd "$D" && docker compose config d2) | grep -q "CRB_STATUS_TOKEN: $TOKEN" && out | grep -q "Später: docker compose up -d d1 d2"'
+# d1 still asks for its mode (default, keep); nothing else
+update "$D" '\n'
+check "already wired: no question, dashboard not treated as a project" '[ "$(rc)" -eq 0 ] && ! out | grep -q "Status-Variablen" && out | grep -q "Boxen angebunden" && ! out | grep -q "crb-dashboard: nicht von crb"'
+
 echo "Refuses root and old Compose"
 FAKE="$WORK/fake"; mkdir -p "$FAKE"
 printf '#!/bin/sh\nif [ "$1" = "-u" ]; then echo 0; else /usr/bin/id "$@"; fi\n' >"$FAKE/id"

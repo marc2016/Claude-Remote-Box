@@ -26,3 +26,11 @@ jobs:
 
       - name: crb-watch tests
         run: tests/watch.test.sh
+
+      - name: dashboard tests
+        working-directory: dashboard
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm test
+          npm run build

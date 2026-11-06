@@ -174,7 +174,8 @@ To reset it: `docker compose down another-project && docker volume rm <stack>_an
 | `CRB_RESTART_DELAY` | `30` | Seconds to wait after the server fails before the container exits and restarts |
 | `CRB_EXTRA_ARGS` | (empty) | Extra flags for `claude remote-control`, split on spaces. `crb add` and `crb update` set `--permission-mode acceptEdits` or `--permission-mode auto` here when you choose that mode; `default` leaves it empty. Other modes (`bypassPermissions`, `dontAsk`, `plan`) can be set by hand, see "Security model" |
 | `CRB_STATUS_URL` | (empty) | Status endpoint, `http://` or `https://`. When set, the box reports its phase, a heartbeat, and its sessions' activity there, see "Status reporting". Empty: nothing is sent |
-| `CRB_STATUS_TOKEN` | (empty) | Bearer token sent with every status request |
+| `CRB_STATUS_TOKEN` | (empty) | Bearer token sent with every status request; `crb dashboard` generates it into `.env` |
+| `CRB_DASHBOARD_BIND` | `127.0.0.1:8080` | Host address and port the dashboard is published on (in `.env`) |
 | `UID` / `GID` | `1000` | User the container runs as. Set them to your host user in `.env` so files in your project keep the right owner |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | (empty) | Git identity for commits made by Claude |
 
@@ -186,9 +187,24 @@ Phone mode is a file `CLAUDE.md` in the project's config directory, `./my-projec
 
 `crb add` writes it when you answer yes to the phone-mode question, and `./crb update` offers it for every project that does not have it yet. It never overwrites an existing file, so edit it freely, for example if Claude ends too many replies with a question. New sessions pick it up without a restart. To turn it off, delete the file.
 
+## Status dashboard
+
+One page, made for the phone, with one card per box: status and phase, permission mode, the active session with model, context size and token totals, what Claude is doing right now, and, most prominent, whether it waits for your approval. A box without setup shows the `setup` command instead. Tap a card for the session's timeline: your prompts, Claude's replies, the tool calls between them. Light and dark follow the device.
+
+```sh
+./crb dashboard        # adds the service and wires every box to it
+docker compose up -d   # starts the dashboard and recreates the boxes
+```
+
+`crb dashboard` generates `CRB_STATUS_TOKEN` in `.env`, writes `services/crb-dashboard.yaml`, and adds `CRB_STATUS_URL` and `CRB_STATUS_TOKEN` to the `box` service in `box.yaml`. The dashboard keeps its SQLite database in a named volume (`crb-dashboard-data`): events for 7 days, session summaries for 90 days. It runs with the same hardening as a box and mounts nothing else: no Docker socket, no config directories, no workspaces. Its image is `ghcr.io/marc2016/claude-remote-box-dashboard`, released together with the box image under the same version.
+
+**Where it is reachable.** By default the port is bound to `127.0.0.1:8080` on the host, so only an SSH tunnel or a reverse proxy on that machine reaches it. Set `CRB_DASHBOARD_BIND` in `.env` to change that, for example `0.0.0.0:8080` for the LAN or the address of a VPN interface such as Tailscale. **There is no login yet.** Whoever reaches the page sees your prompts and Claude's replies. Keep it on a private network or behind a VPN; authentication is planned as the next step.
+
+The session link on a card opens the session in the Claude app once the URL pattern is confirmed; until then the card offers the session id to copy. `./crb update` adds the two status variables to an installation that got the dashboard by hand. To remove the dashboard: delete `services/crb-dashboard.yaml`, its line in `compose.yaml`, and the two variables in `box.yaml`, then `docker compose up -d`.
+
 ## Status reporting
 
-A box can report what it does to an HTTP endpoint you run, for example the status dashboard (a separate component). Set `CRB_STATUS_URL` and `CRB_STATUS_TOKEN` on the service; without the URL nothing runs and nothing is sent.
+A box can report what it does to an HTTP endpoint you run, normally the status dashboard above. Set `CRB_STATUS_URL` and `CRB_STATUS_TOKEN` on the service; without the URL nothing runs and nothing is sent.
 
 What is sent, as JSON arrays of events with the box name, a timestamp, and a sequence number: `phase` on every change (`waiting-config`, `waiting-setup`, `running`, `restarting`), a `heartbeat` every 30 s with phase, uptime, image and Claude Code version, and spawn mode, and per session `session_start`, `prompt`, `reply`, `tool` (tool name plus the command, path, or pattern), `tool_result` (ok or error), `waiting` when a tool call has had no result for 10 s (a permission prompt or a long-running command, the box cannot tell), `resumed`, `summary` after each reply (model, token totals, current context size, turns, tool calls, and cost and changed lines when the transcript has them), and `session_end` after an hour without activity.
 

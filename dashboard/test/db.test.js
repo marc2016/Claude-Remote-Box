@@ -1,0 +1,93 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { openDb } from '../server/db.js';
+import { buildCards } from '../server/cards.js';
+
+const T0 = Date.parse('2026-11-06T12:00:00Z');
+const iso = (offsetS) => new Date(T0 + offsetS * 1000).toISOString();
+let seq = 0;
+const ev = (type, extra = {}) => ({ box: 'b1', ts: iso(seq), seq: ++seq, type, ...extra });
+
+test('batch stores all events, replay stores none twice', () => {
+  const store = openDb(':memory:');
+  const batch = [ev('phase', { phase: 'running' }), ev('heartbeat', { phase: 'running', image: '0.3.0' }),
+    ev('session_start', { session: 's1', cwd: '/workspace', branch: 'main', permission_mode: 'auto' }),
+    ev('prompt', { session: 's1', text: 'Zeig mir die Startseite bitte' })];
+  const changed = store.ingest(batch, new Date(T0));
+  assert.deepEqual(changed, ['b1']);
+  assert.equal(store.db.prepare('SELECT COUNT(*) c FROM events').get().c, 4);
+  const again = store.ingest(batch, new Date(T0 + 1000));
+  assert.deepEqual(again, []);
+  assert.equal(store.db.prepare('SELECT COUNT(*) c FROM events').get().c, 4);
+  const cards = buildCards(store, T0 + 5000);
+  assert.equal(cards.boxes[0].up, true);
+  assert.equal(cards.boxes[0].phase, 'running');
+  assert.equal(cards.boxes[0].permission_mode, 'auto');
+  assert.equal(cards.boxes[0].sessions[0].label, 'Zeig mir die Startseite bitte');
+});
+
+test('waiting is set by waiting and cleared by tool_result', () => {
+  const store = openDb(':memory:');
+  store.ingest([ev('session_start', { session: 's1' }), ev('tool', { session: 's1', tool: 'Bash', summary: 'npm test', call_id: 'c1' }),
+    ev('waiting', { session: 's1', tool: 'Bash', summary: 'npm test', source: 'heuristic' })], new Date(T0));
+  let s = buildCards(store, T0 + 15000).boxes[0].sessions[0];
+  assert.equal(s.state, 'waiting');
+  assert.equal(s.waiting_text, 'Bash: npm test');
+  store.ingest([ev('tool_result', { session: 's1', call_id: 'c1', ok: true }), ev('resumed', { session: 's1' })], new Date(T0));
+  s = buildCards(store, T0 + 20000).boxes[0].sessions[0];
+  assert.equal(s.state, 'working');
+  assert.equal(s.waiting_since, null);
+});
+
+test('derived states: down box, idle and ended sessions, summary totals', () => {
+  const store = openDb(':memory:');
+  store.ingest([ev('heartbeat', { phase: 'running' })], new Date(T0));
+  store.ingest([ev('session_start', { session: 's1' }),
+    ev('summary', { session: 's1', model: 'claude-opus-5-5', tokens_in: 47, tokens_out: 180, cache_read: 61100, cache_write: 600, context: 20705, turns: 3, tool_calls: 2, cost_usd: 0.42 }),
+  ], new Date(T0));
+  let cards = buildCards(store, T0 + 30000);
+  assert.equal(cards.boxes[0].up, true);
+  assert.equal(cards.boxes[0].sessions[0].state, 'working');
+  assert.equal(cards.boxes[0].sessions[0].tokens_out, 180);
+  assert.equal(cards.boxes[0].sessions[0].context_window, 200000);
+  assert.equal(cards.boxes[0].sessions[0].cost_usd, 0.42);
+  cards = buildCards(store, T0 + 120000);
+  assert.equal(cards.boxes[0].up, false, 'no heartbeat for 2 min');
+  assert.equal(cards.boxes[0].sessions[0].state, 'idle');
+  store.ingest([ev('session_end', { session: 's1', reason: 'idle' })], new Date(T0));
+  assert.equal(buildCards(store, T0 + 120000).boxes[0].sessions[0].state, 'ended');
+});
+
+test('waiting-setup box without sessions, git worktree picked by branch', () => {
+  const store = openDb(':memory:');
+  store.ingest([ev('phase', { phase: 'waiting-setup' }), ev('heartbeat', { phase: 'waiting-setup' })], new Date(T0));
+  const b = buildCards(store, T0).boxes[0];
+  assert.equal(b.phase, 'waiting-setup');
+  assert.equal(b.sessions.length, 0);
+  store.ingest([ev('session_start', { session: 's1', branch: 'feat', cwd: '/workspace/.wt/x' }),
+    ev('git', { worktrees: [{ path: '/workspace', branch: 'main', ahead: 0, dirty: 0 }, { path: '/workspace/.wt/x', branch: 'feat', ahead: 2, dirty: 1, subject: 'Add nav' }] })], new Date(T0));
+  const s = buildCards(store, T0).boxes[0].sessions[0];
+  assert.equal(s.git.ahead, 2);
+  assert.equal(s.git.subject, 'Add nav');
+});
+
+test('pruning removes old events and keeps recent sessions', () => {
+  const store = openDb(':memory:');
+  const old = new Date(T0 - 8 * 86400000).toISOString();
+  const month = new Date(T0 - 30 * 86400000).toISOString();
+  store.ingest([{ box: 'b1', seq: 1, ts: old, type: 'prompt', session: 'old', text: 'x' },
+    { box: 'b1', seq: 2, ts: month, type: 'summary', session: 'old', turns: 1 },
+    { box: 'b1', seq: 3, ts: iso(0), type: 'prompt', session: 'new', text: 'y' }], new Date(T0));
+  const r = store.prune(new Date(T0));
+  assert.equal(r.events, 2);
+  assert.equal(r.sessions, 0, 'session 30 days old is kept');
+  assert.equal(store.sessionEvents('new').length, 1);
+  assert.equal(store.sessionEvents('old').length, 0);
+});
+
+test('events outside the contract are stored but harmless', () => {
+  const store = openDb(':memory:');
+  store.ingest([ev('mystery', { session: 's1', foo: 1 }), { nonsense: true }, ev('prompt', { session: 's1', text: 'ok' })], new Date(T0));
+  assert.equal(store.db.prepare('SELECT COUNT(*) c FROM events').get().c, 2);
+  assert.equal(buildCards(store, T0).boxes[0].sessions[0].label, 'ok');
+});

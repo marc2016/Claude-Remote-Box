@@ -45,6 +45,22 @@ services:
   #     - ./another-project/config:/home/node/.claude
   #     - another-project-browsers:/home/node/.cache/ms-playwright
 
+  # Status dashboard (see README, "Status dashboard"). Needs CRB_STATUS_TOKEN
+  # in .env and the two CRB_STATUS_* lines on every box above.
+  # crb-dashboard:
+  #   image: ghcr.io/marc2016/claude-remote-box-dashboard:latest
+  #   restart: unless-stopped
+  #   user: "${UID:-1000}:${GID:-1000}"
+  #   cap_drop: [ALL]
+  #   security_opt: [no-new-privileges:true]
+  #   environment:
+  #     CRB_STATUS_TOKEN: "${CRB_STATUS_TOKEN}"
+  #   ports:
+  #     - "${CRB_DASHBOARD_BIND:-127.0.0.1:8080}:8080"
+  #   volumes:
+  #     - crb-dashboard-data:/data
+
 volumes:
   my-project-browsers:
   # another-project-browsers:
+  # crb-dashboard-data:

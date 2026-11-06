@@ -3,6 +3,7 @@
 #   ./crb add [git-url]   adds a project service (starts a new setup in an
 #                         empty directory)
 #   ./crb update          updates this script, the image, and every project
+#   ./crb dashboard       adds the status dashboard and wires every box to it
 # Run it in the directory that holds compose.yaml.
 # A new box.yaml uses the newest release (latest). Override the tag to pin a
 # release or test an unreleased build: CRB_VERSION=edge ./crb add
@@ -15,6 +16,7 @@ set -euo pipefail
 
 CRB_VERSION="${CRB_VERSION:-latest}"
 CRB_IMAGE="ghcr.io/marc2016/claude-remote-box:${CRB_VERSION}"
+CRB_DASHBOARD_IMAGE="ghcr.io/marc2016/claude-remote-box-dashboard:${CRB_VERSION}"
 # Where `update` fetches the newest copy of this script. A local path works too.
 CRB_SOURCE="${CRB_SOURCE:-https://raw.githubusercontent.com/marc2016/Claude-Remote-Box/main/crb}"
 
@@ -42,6 +44,7 @@ EOF
 usage() {
   echo "Usage: ./crb add [git-url]   Projekt hinzufügen"
   echo "       ./crb update          Skript, Image und Projekte aktualisieren"
+  echo "       ./crb dashboard       Status-Dashboard anlegen und Boxen anbinden"
 }
 
 # ask VAR "Question" [default]: empty input takes the default.
@@ -173,6 +176,45 @@ set_permission_flag() {
   fi
   cat "$tmp" > "$file"
   rm -f "$tmp"
+}
+
+# box_has_env KEY: the box service in box.yaml sets KEY.
+box_has_env() { grep -qE "^      $1:" box.yaml; }
+
+# box_env_line KEY VALUE: adds `KEY: VALUE` to the environment of the box
+# service in box.yaml, creating the block after the image line when missing.
+box_env_line() {
+  local key=$1 value=$2 tmp
+  tmp=$(mktemp)
+  if grep -qE '^    environment:[[:space:]]*$' box.yaml; then
+    awk -v line="      $key: $value" '{ print } !done && /^    environment:[[:space:]]*$/ { print line; done = 1 }' box.yaml > "$tmp"
+  else
+    awk -v line="      $key: $value" '{ print } !done && /^    image:/ { print "    environment:"; print line; done = 1 }' box.yaml > "$tmp"
+  fi
+  cat "$tmp" > box.yaml
+  rm -f "$tmp"
+}
+
+# ensure_status_token: CRB_STATUS_TOKEN in .env, generated when missing.
+ensure_status_token() {
+  if [ -f .env ] && grep -qE '^CRB_STATUS_TOKEN=.+' .env; then return 0; fi
+  local token
+  token=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
+  [ -n "$token" ] || die "Konnte kein Token erzeugen."
+  if [ -f .env ] && [ -n "$(tail -c 1 .env)" ]; then echo >> .env; fi
+  printf 'CRB_STATUS_TOKEN=%s\n' "$token" >> .env
+}
+
+# status_lines_missing: which of the two status variables box.yaml lacks.
+status_lines_missing() {
+  box_has_env CRB_STATUS_URL || echo CRB_STATUS_URL
+  box_has_env CRB_STATUS_TOKEN || echo CRB_STATUS_TOKEN
+}
+
+# add_status_lines: adds the missing status variables to box.yaml.
+add_status_lines() {
+  box_has_env CRB_STATUS_URL || box_env_line CRB_STATUS_URL '"http://crb-dashboard:8080/api/ingest"'
+  box_has_env CRB_STATUS_TOKEN || box_env_line CRB_STATUS_TOKEN '"${CRB_STATUS_TOKEN}"'
 }
 
 # --- Checks shared by both subcommands ---------------------------------------
@@ -592,6 +634,17 @@ cmd_update() {
     fi
   fi
 
+  local plan_status=0 missing_status=""
+  if [ "$layout" = services ] && [ -f services/crb-dashboard.yaml ]; then
+    missing_status=$(status_lines_missing | tr '\n' ' ')
+    if [ -n "$missing_status" ]; then
+      echo "   Dashboard vorhanden, aber box.yaml fehlt: $missing_status"
+      if confirm_yes "   Status-Variablen in box.yaml eintragen (alle Boxen melden sich dann)?"; then plan_status=1; fi
+    else
+      echo "   Dashboard: Boxen angebunden"
+    fi
+  fi
+
   # Parallel arrays (bash 3.2 has no associative arrays).
   local -a names=() modes=() phones=()
   local f n permission current extra has_file
@@ -599,6 +652,7 @@ cmd_update() {
     for f in services/*.yaml; do
       [ -f "$f" ] || continue
       n=$(basename "$f" .yaml)
+      [ "$n" = crb-dashboard ] && continue
       if ! grep -qF -- "../$n/config:/home/node/.claude" "$f"; then
         echo "   $n: nicht von crb angelegt, wird übersprungen."
         continue
@@ -645,11 +699,17 @@ cmd_update() {
     echo "  box.yaml:  Image-Tag $tag -> latest"
     changed_files+=(box.yaml)
   fi
+  if [ "$plan_status" -eq 1 ]; then
+    echo "  box.yaml:  $missing_status(alle Boxen werden neu gestartet)"
+    [ "$plan_tag" -eq 1 ] || changed_files+=(box.yaml)
+    for i in "${!names[@]}"; do changed_services+=("${names[$i]}"); done
+  fi
   for i in "${!names[@]}"; do
     n=${names[$i]}
     if [ -n "${modes[$i]}" ]; then
       echo "  services/$n.yaml:  CRB_EXTRA_ARGS --permission-mode ${modes[$i]}"
-      changed_files+=("services/$n.yaml"); changed_services+=("$n")
+      changed_files+=("services/$n.yaml")
+      [ "$plan_status" -eq 1 ] || changed_services+=("$n")
     fi
     if [ "${phones[$i]}" -eq 1 ]; then
       echo "  $n/config/CLAUDE.md:  Handy-Modus anlegen"
@@ -683,6 +743,11 @@ cmd_update() {
       sed -i.crbtmp -E "s#(ghcr\.io/marc2016/claude-remote-box:)$tag#\1latest#" box.yaml
       rm -f box.yaml.crbtmp
       echo "   box.yaml: Image-Tag -> latest"
+    fi
+    if [ "$plan_status" -eq 1 ]; then
+      ensure_status_token
+      add_status_lines
+      echo "   box.yaml: $missing_status"
     fi
     for i in "${!names[@]}"; do
       n=${names[$i]}
@@ -730,6 +795,118 @@ cmd_update() {
 }
 
 # =============================================================================
+# dashboard
+# =============================================================================
+
+cmd_dashboard() {
+  banner "Dashboard hinzufügen"
+  check_host
+  [ -f compose.yaml ] || die "Hier liegt keine compose.yaml. Bitte im Ordner der Installation ausführen."
+  local service_file=services/crb-dashboard.yaml
+  if [ -f "$service_file" ]; then
+    echo "   $service_file ist schon vorhanden, nichts zu tun."
+    echo "   Boxen anbinden oder prüfen: ./crb update"
+    exit 0
+  fi
+  if [ ! -f box.yaml ] || [ ! -d services ]; then
+    echo "   Einzeldatei-Setup (Services in compose.yaml): Dateien werden nicht bearbeitet."
+    echo "   Von Hand eintragen:"
+    echo "     1) .env:  CRB_STATUS_TOKEN=<zufälliger Wert>"
+    echo "     2) jeder Box unter environment:"
+    echo "          CRB_STATUS_URL: \"http://crb-dashboard:8080/api/ingest\""
+    echo "          CRB_STATUS_TOKEN: \"\${CRB_STATUS_TOKEN}\""
+    echo "     3) ein Service crb-dashboard wie in compose.example.yaml (Image $CRB_DASHBOARD_IMAGE)"
+    exit 0
+  fi
+  if ! grep -qE '^include:[[:space:]]*$' compose.yaml; then
+    die "compose.yaml: 'include:' muss allein in seiner Zeile stehen, mit den Einträgen als Liste darunter."
+  fi
+
+  local token_state="vorhanden" missing_status
+  if ! { [ -f .env ] && grep -qE '^CRB_STATUS_TOKEN=.+' .env; }; then token_state="wird erzeugt"; fi
+  missing_status=$(status_lines_missing | tr '\n' ' ')
+  local -a boxes=()
+  local f
+  for f in services/*.yaml; do
+    [ -f "$f" ] || continue
+    boxes+=("$(basename "$f" .yaml)")
+  done
+
+  echo ""
+  echo "📋 Zusammenfassung"
+  echo "  Dashboard:    $service_file (Image $CRB_DASHBOARD_IMAGE)"
+  echo "  Port:         \${CRB_DASHBOARD_BIND:-127.0.0.1:8080} -> 8080 (in .env änderbar, kein Login!)"
+  echo "  Token:        CRB_STATUS_TOKEN in .env ($token_state)"
+  if [ -n "$missing_status" ]; then
+    echo "  box.yaml:     $missing_status"
+  else
+    echo "  box.yaml:     Status-Variablen schon vorhanden"
+  fi
+  echo "  Boxen:        ${boxes[*]:-keine} (melden sich nach dem Neustart)"
+  echo ""
+  if ! confirm "Anlegen?"; then
+    echo "Abgebrochen, nichts geändert."
+    exit 0
+  fi
+
+  # --- Changes (restorable) --------------------------------------------------
+  local backup
+  backup=$(mktemp -d)
+  cp -p compose.yaml "$backup/compose.yaml"
+  cp -p box.yaml "$backup/box.yaml"
+  [ -f .env ] && cp -p .env "$backup/.env"
+
+  echo ""
+  echo "✍️  1/2 Schreibe Dateien..."
+  ensure_status_token
+  add_status_lines
+  cat > "$service_file" <<EOF
+# Created by crb. The status dashboard: one card per box, fed by the boxes'
+# status reports. No login: keep the port on a private network or a VPN.
+services:
+  crb-dashboard:
+    image: ${CRB_DASHBOARD_IMAGE}
+    restart: unless-stopped
+    user: "\${UID:-1000}:\${GID:-1000}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      CRB_STATUS_TOKEN: "\${CRB_STATUS_TOKEN}"
+    ports:
+      - "\${CRB_DASHBOARD_BIND:-127.0.0.1:8080}:8080"
+    volumes:
+      - "crb-dashboard-data:/data"
+
+volumes:
+  crb-dashboard-data: {}
+EOF
+  local tmp
+  tmp=$(mktemp)
+  awk -v line="  - $service_file" '{ print } !done && /^include:[[:space:]]*$/ { print line; done = 1 }' compose.yaml > "$tmp"
+  cat "$tmp" > compose.yaml
+  rm -f "$tmp"
+
+  echo ""
+  echo "🔍 2/2 Prüfe mit docker compose config..."
+  local check
+  if ! check=$(docker compose config -q 2>&1); then
+    echo "$check" >&2
+    rm -f "$service_file"
+    cp -p "$backup/compose.yaml" compose.yaml
+    cp -p "$backup/box.yaml" box.yaml
+    if [ -f "$backup/.env" ]; then cp -p "$backup/.env" .env; else rm -f .env; fi
+    rm -rf "$backup"
+    die "Die Compose-Konfiguration ist ungültig. Alle Änderungen wurden zurückgenommen."
+  fi
+  rm -rf "$backup"
+
+  echo ""
+  echo "✨ Dashboard ist angelegt. Weiter mit:"
+  echo "   docker compose up -d        (startet das Dashboard und bindet die Boxen an)"
+  echo "   http://127.0.0.1:8080       (oder CRB_DASHBOARD_BIND in .env, siehe README)"
+}
+
+# =============================================================================
 
 main() {
   local cmd=${1-}
@@ -737,6 +914,7 @@ main() {
   case "$cmd" in
     add) cmd_add "$@" ;;
     update) cmd_update "$@" ;;
+    dashboard) cmd_dashboard "$@" ;;
     *) usage >&2; exit 64 ;;
   esac
 }

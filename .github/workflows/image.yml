@@ -1,6 +1,7 @@
 name: image
 
-# A tag vX.Y.Z publishes a release: X.Y.Z, latest and claude-<claude code version>.
+# A tag vX.Y.Z publishes a release: X.Y.Z, latest and claude-<claude code version>,
+# plus the dashboard image under the same X.Y.Z and latest.
 # A manual run publishes the current branch as edge and never moves a release tag.
 on:
   push:
@@ -31,10 +32,17 @@ jobs:
             version="edge-${GITHUB_SHA::7}"
             tags="$IMAGE:edge"
           fi
+          dash="ghcr.io/${{ github.repository_owner }}/claude-remote-box-dashboard"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            dashboard_tags="$dash:$version,$dash:latest"
+          else
+            dashboard_tags="$dash:edge"
+          fi
           {
             echo "claude=$claude"
             echo "version=$version"
             echo "tags=$tags"
+            echo "dashboard_tags=$dashboard_tags"
           } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
@@ -58,5 +66,18 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.description=Claude Code in a hardened Compose service, driven from your phone via Remote Control
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+
+      - name: Dashboard image
+        uses: docker/build-push-action@v6
+        with:
+          context: dashboard
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.version.outputs.dashboard_tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description=Status dashboard for claude-remote-box
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
