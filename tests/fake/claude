@@ -1,0 +1,19 @@
+#!/bin/sh
+# Fake claude for tests. Behavior via files in $CLAUDE_CONFIG_DIR/.fake-*.
+C=$CLAUDE_CONFIG_DIR
+echo "fake-claude $*" >> /tmp/fake.log
+case "${1:-}" in
+  auth)
+    [ -f "$C/.fake-login-fail" ] && { echo "login failed"; exit 1; }
+    echo '{}' > "$C/.credentials.json"; echo "logged in" ;;
+  remote-control)
+    echo "prefix=${CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX:-}"
+    [ -f "$C/.fake-rc-exit" ] && exit "$(cat "$C/.fake-rc-exit")"
+    echo "Connected"
+    while :; do sleep 1; done ;;
+  "")
+    if [ ! -f "$C/.fake-no-trust" ]; then
+      echo '{"projects":{"/workspace":{"hasTrustDialogAccepted":true}}}' > "$C/.claude.json"
+    fi
+    echo "trust step done" ;;
+esac

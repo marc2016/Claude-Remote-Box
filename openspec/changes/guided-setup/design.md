@@ -84,3 +84,9 @@ The quick start becomes `mkdir` + `chmod`, `up -d`, `exec -it <service> setup`. 
 ## Migration Plan
 
 Release as `0.3.0`. Existing users change the tag and run `docker compose pull && docker compose up -d`. Their services start directly through the legacy rule (D1). If the trust field cannot be read for some reason, the service waits and the log tells them to run `setup` once.
+
+## Verification
+
+Tasks 1.1 to 4.1 are covered by `tests/setup.test.sh`. It builds the image plus a variant with a fake `claude` (`tests/fake/claude`) and runs real containers: trust check for true, false, missing field and missing file; `waiting-config` with a root-owned config volume, continuing after `chown` without a restart; `waiting-setup` with the D1 rules (login plus trust created while waiting does not start the server, the marker does, the legacy rule fires at start and writes the marker); the state file and stop within 5 s in every phase; the failure message after a server error; `setup` for a fresh config, a config with login and trust, a failing login and a missing trust; Ctrl-C in step 3 through a pty under `docker run` and `docker exec`; the healthcheck. A waiting container turns unhealthy only after three failed checks, about 90 s after start, not right after the start period.
+
+Field test on the Mini-PC, 2026-11-06, with the `edge` image built from `186c042`: the new project `janus-note-vs` was added with `add-project.sh`, started with `up -d`, and set up with `exec -it janus-note-vs setup`. It connected without another command, shows up in the Claude app with its first session named `janus-note-vs-...`, and `docker compose ps` shows it healthy. The existing LoopTalk service, updated to the same image, started directly without `setup` and is healthy.
