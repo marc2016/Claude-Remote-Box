@@ -74,3 +74,7 @@ Fetch the new script once by hand: `curl -fsSLO .../main/crb && chmod +x crb && 
 ## Open Questions
 
 - Whether `raw.githubusercontent.com` bypasses its cache for a changed query string (task 1.3). The answer changes one sentence in the README, not the design.
+
+## Field test
+
+2026-11-06, Mini-PC, `crb` from commit `3d01f3d`: `add-project.sh` replaced by `crb`, `./crb update` run on the installation with `janus-note-vs` and LoopTalk. The user reported the run and the result as good; the services reconnected. Not separately confirmed: the "nothing to do" message on a second run and the phone-mode behavior over several days, which `phone-friendly-projects` task 5.1 covers.

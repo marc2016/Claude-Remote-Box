@@ -10,6 +10,18 @@ case "${1:-}" in
     echo "prefix=${CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX:-}"
     [ -f "$C/.fake-rc-exit" ] && exit "$(cat "$C/.fake-rc-exit")"
     echo "Connected"
+    # Write a small session transcript like Claude Code does, so the status
+    # watcher has something to report. .fake-slow-tool=N delays the tool result.
+    (
+      sleep 2
+      D="$C/projects/-workspace"; mkdir -p "$D"; T="$D/fake-session.jsonl"
+      now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+      printf '{"type":"user","sessionId":"fake-session","cwd":"/workspace","gitBranch":"main","version":"fake","permissionMode":"default","timestamp":"%s","message":{"role":"user","content":"Zeig mir die Startseite"}}\n' "$(now)" >> "$T"
+      printf '{"type":"assistant","sessionId":"fake-session","timestamp":"%s","message":{"role":"assistant","model":"claude-fake","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"npm test"}}],"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}}}\n' "$(now)" >> "$T"
+      sleep "$(cat "$C/.fake-slow-tool" 2>/dev/null || echo 1)"
+      printf '{"type":"user","sessionId":"fake-session","timestamp":"%s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}\n' "$(now)" >> "$T"
+      printf '{"type":"assistant","sessionId":"fake-session","timestamp":"%s","message":{"role":"assistant","model":"claude-fake","content":[{"type":"text","text":"Fertig, alle Tests laufen."}],"usage":{"input_tokens":5,"output_tokens":15,"cache_read_input_tokens":110,"cache_creation_input_tokens":0}}}\n' "$(now)" >> "$T"
+    ) &
     while :; do sleep 1; done ;;
   "")
     if [ ! -f "$C/.fake-no-trust" ]; then

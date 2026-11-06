@@ -20,6 +20,7 @@ vols=() ctrs=()
 cleanup(){
   docker ps -aq --filter name=crbc- | xargs -r docker rm -f >/dev/null 2>&1
   docker volume ls -q --filter name=crbv- | xargs -r docker volume rm >/dev/null 2>&1
+  docker network rm crbt-net >/dev/null 2>&1
 }
 cleanup
 trap 'cleanup; rm -rf "$S"' EXIT
@@ -111,6 +112,30 @@ vr=$(newvol h-run); put "$vr" .credentials.json '{}'; put "$vr" .crb-setup-done 
 sleep 100
 check "waiting -> unhealthy" '[ "$(docker inspect -f "{{.State.Health.Status}}" "$nw")" = unhealthy ]'
 check "running -> healthy" '[ "$(docker inspect -f "{{.State.Health.Status}}" "$nr")" = healthy ]'
+
+echo "5. status reporting"
+docker network create crbt-net >/dev/null
+docker run -d --name crbc-recv --network crbt-net -u 1000:1000 -v "$ROOT/tests/receiver.js:/r.js:ro" --entrypoint node $IMG /r.js 8080 - tok >/dev/null
+recv(){ docker logs crbc-recv 2>/dev/null; }
+revents(){ recv | node -e 'const l=require("fs").readFileSync(0,"utf8").split("\n").filter(Boolean);for(const x of l){for(const e of JSON.parse(x).events)console.log(JSON.stringify(e))}' 2>/dev/null; }
+rwait(){ local pat=$1 t=${2:-15}; for _ in $(seq $((t*2))); do revents | grep -q "$pat" && return 0; sleep 0.5; done; return 1; }
+procs(){ docker exec "$1" sh -c 'for p in /proc/[0-9]*; do printf "%s " "$(basename "$p")"; tr "\0" " " < "$p/cmdline" 2>/dev/null; echo; done'; }
+STATUS=(--network crbt-net -e CRB_STATUS_URL=http://crbc-recv:8080/api/ingest -e CRB_STATUS_TOKEN=tok)
+v=$(newvol st); n=$(start st "$v" "${STATUS[@]}")
+check "waiting-setup reported with token and box name" 'rwait "\"type\":\"phase\",\"phase\":\"waiting-setup\"" 15 && recv | grep -q "Bearer tok" && revents | grep -q "\"box\":\"demo\""'
+check "two heartbeats within 70s" 'for _ in $(seq 70); do [ "$(revents | grep -c "\"type\":\"heartbeat\"")" -ge 2 ] && break; sleep 1; done; [ "$(revents | grep -c "\"type\":\"heartbeat\"")" -ge 2 ] && revents | grep "\"type\":\"heartbeat\"" | head -1 | grep -q "\"phase\":\"waiting-setup\""'
+put "$v" .credentials.json '{}'; put "$v" .crb-setup-done ''
+check "running reported, server started" 'rwait "\"phase\":\"running\"" 15 && waitfor "$n" "Connected" 10'
+check "watcher and server are running" 'procs "$n" | grep -q "crb-watch.js" && procs "$n" | grep -q "remote-control"'
+check "session events from the transcript" 'rwait "\"type\":\"reply\"" 30 && revents | grep -q "\"type\":\"session_start\"" && revents | grep -q "\"text\":\"Zeig mir die Startseite\"" && revents | grep -q "\"tool\":\"Bash\",\"summary\":\"npm test\"" && revents | grep -q "\"type\":\"tool_result\"" && revents | grep "\"type\":\"summary\"" | tail -1 | grep -q "\"model\":\"claude-fake\",\"tokens_in\":15"'
+check "heartbeat in running phase names spawn mode" 'for _ in $(seq 40); do revents | grep "\"type\":\"heartbeat\"" | grep -q "\"phase\":\"running\"" && break; sleep 1; done; revents | grep "\"type\":\"heartbeat\"" | grep "\"phase\":\"running\"" | grep -q "\"spawn\":\"same-dir\""'
+server_pid=$(procs "$n" | grep "remote-control" | head -1 | cut -d" " -f1)
+docker exec "$n" sh -c 'for p in /proc/[0-9]*; do [ "$(basename "$p")" = "$$" ] && continue; grep -q crb-watch.js "$p/cmdline" 2>/dev/null && kill "$(basename "$p")"; done' >/dev/null 2>&1
+sleep 8
+check "watcher restarted, server kept its pid" 'procs "$n" | grep -q "crb-watch.js" && logs "$n" | grep -q "status watcher exited, restarting" && [ "$(procs "$n" | grep "remote-control" | head -1 | cut -d" " -f1)" = "$server_pid" ]'
+check "stop with watcher < 5s" '[ "$(stoptime "$n")" -lt 5 ]'
+v=$(newvol st2); put "$v" .credentials.json '{}'; put "$v" .crb-setup-done ''; n=$(start st2 "$v"); waitfor "$n" "Connected" 10 >/dev/null
+check "no watcher and no status log without URL" '! procs "$n" | grep -q "crb-watch" && ! logs "$n" | grep -qi "status"'
 
 echo ""
 [ "$fails" -eq 0 ] && echo "All checks passed." || { echo "$fails check(s) failed."; exit 1; }

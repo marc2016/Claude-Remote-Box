@@ -173,6 +173,8 @@ To reset it: `docker compose down another-project && docker volume rm <stack>_an
 | `CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX` | value of `CRB_NAME` | Prefix for new session names |
 | `CRB_RESTART_DELAY` | `30` | Seconds to wait after the server fails before the container exits and restarts |
 | `CRB_EXTRA_ARGS` | (empty) | Extra flags for `claude remote-control`, split on spaces. `crb add` and `crb update` set `--permission-mode acceptEdits` or `--permission-mode auto` here when you choose that mode; `default` leaves it empty. Other modes (`bypassPermissions`, `dontAsk`, `plan`) can be set by hand, see "Security model" |
+| `CRB_STATUS_URL` | (empty) | Status endpoint, `http://` or `https://`. When set, the box reports its phase, a heartbeat, and its sessions' activity there, see "Status reporting". Empty: nothing is sent |
+| `CRB_STATUS_TOKEN` | (empty) | Bearer token sent with every status request |
 | `UID` / `GID` | `1000` | User the container runs as. Set them to your host user in `.env` so files in your project keep the right owner |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | (empty) | Git identity for commits made by Claude |
 
@@ -183,6 +185,16 @@ Any command given to the container replaces the server, for example `docker comp
 Phone mode is a file `CLAUDE.md` in the project's config directory, `./my-project/config/CLAUDE.md` on the host. Inside the container that directory is `/home/node/.claude`, Claude Code's user-level memory, so every session of the project reads it, including sessions in git worktrees, and it never enters your repository. The file tells Claude that you read and answer on a phone: compact replies without wide tables or pasted output, and, whenever there is a decision or a next step to choose, a question with tappable options (the `AskUserQuestion` tool, which the Claude app shows as a list) instead of an open question.
 
 `crb add` writes it when you answer yes to the phone-mode question, and `./crb update` offers it for every project that does not have it yet. It never overwrites an existing file, so edit it freely, for example if Claude ends too many replies with a question. New sessions pick it up without a restart. To turn it off, delete the file.
+
+## Status reporting
+
+A box can report what it does to an HTTP endpoint you run, for example the status dashboard (a separate component). Set `CRB_STATUS_URL` and `CRB_STATUS_TOKEN` on the service; without the URL nothing runs and nothing is sent.
+
+What is sent, as JSON arrays of events with the box name, a timestamp, and a sequence number: `phase` on every change (`waiting-config`, `waiting-setup`, `running`, `restarting`), a `heartbeat` every 30 s with phase, uptime, image and Claude Code version, and spawn mode, and per session `session_start`, `prompt`, `reply`, `tool` (tool name plus the command, path, or pattern), `tool_result` (ok or error), `waiting` when a tool call has had no result for 10 s (a permission prompt or a long-running command, the box cannot tell), `resumed`, `summary` after each reply (model, token totals, current context size, turns, tool calls, and cost and changed lines when the transcript has them), and `session_end` after an hour without activity.
+
+The data comes from a small watcher process in the container that reads the session transcripts Claude Code writes in the config directory. It only reads; sessions are not slowed down. Prompts and replies are truncated to 4000 characters. Sends time out after 2 s; while the endpoint is unreachable, events are kept in a spool (newest 500) and delivered in order afterwards.
+
+**Privacy:** your prompts and Claude's replies leave the box, to the host you configured. Use `https` or a private network when the endpoint is not on the same machine. The token only lets the endpoint tell your boxes apart from strangers; it does not encrypt anything. A receiver without a heartbeat for 90 s should treat the box as down.
 
 ## Screenshots
 

@@ -52,6 +52,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.version.outputs.tags }}
+          build-args: |
+            CRB_VERSION=${{ steps.version.outputs.version }}
           # The source label links the package to this repository on GHCR.
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}

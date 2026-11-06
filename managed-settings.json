@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node /usr/local/lib/crb/crb-watch.js --hook", "timeout": 5 }
+        ]
+      }
+    ]
+  }
+}

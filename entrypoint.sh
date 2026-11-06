@@ -19,7 +19,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 log() { echo "claude-remote-box: $*" >&2; }
-state() { echo "$1" > "$CRB_STATE" 2>/dev/null || true; }
+state() { crb_report_phase "$1"; }
 
 if [ -z "${CRB_NAME:-}" ]; then
     log "CRB_NAME is not set. Set it to the name shown in the Claude app."
@@ -28,8 +28,54 @@ fi
 
 # Every wait runs as a background child, so a stop request ends it at once.
 pid=""
+hb_pid=""
+watch_pid=""
 stopping=0
-trap 'stopping=1; if [ -n "$pid" ]; then kill -TERM "$pid" 2>/dev/null || true; fi' TERM INT
+trap 'stopping=1; for p in $pid $hb_pid $watch_pid; do kill -TERM "$p" 2>/dev/null || true; done' TERM INT
+
+# --- status reporting (only when CRB_STATUS_URL is set) -------------------------
+
+# While waiting, a heartbeat loop keeps the box visible; in the running phase
+# the watcher takes over and the loop is stopped.
+start_heartbeat() {
+    [ -n "${CRB_STATUS_URL:-}" ] || return 0
+    (
+        trap 'exit 0' TERM INT
+        while :; do
+            crb_emit type=heartbeat
+            sleep 30 & wait $! || true
+        done
+    ) &
+    hb_pid=$!
+}
+stop_heartbeat() {
+    if [ -n "$hb_pid" ]; then kill -TERM "$hb_pid" 2>/dev/null || true; hb_pid=""; fi
+}
+
+# The watcher reads the session transcripts and reports them. It is restarted
+# after 5 s if it exits; the server is not affected either way.
+start_watcher() {
+    [ -n "${CRB_STATUS_URL:-}" ] || return 0
+    if [ -z "${CRB_STATUS_TOKEN:-}" ]; then log "CRB_STATUS_TOKEN is empty, status events are sent without a token"; fi
+    (
+        w=""
+        trap 'if [ -n "$w" ]; then kill -TERM "$w" 2>/dev/null || true; fi; exit 0' TERM INT
+        while :; do
+            node "$CRB_WATCH" &
+            w=$!
+            wait "$w" || true
+            w=""
+            log "status watcher exited, restarting in 5s"
+            sleep 5 & wait $! || true
+        done
+    ) &
+    watch_pid=$!
+}
+stop_watcher() {
+    if [ -n "$watch_pid" ]; then kill -TERM "$watch_pid" 2>/dev/null || true; watch_pid=""; fi
+}
+
+start_heartbeat
 
 pause() {
     sleep "$1" &
@@ -101,8 +147,11 @@ fi
 
 cd /workspace
 spawn=$(crb_spawn_mode)
+export CRB_SPAWN_EFFECTIVE="$spawn"
 log "starting Remote Control '$CRB_NAME' (spawn mode: $spawn)"
+stop_heartbeat
 state running
+start_watcher
 
 # Run the server as a child instead of exec'ing it, so a failed start can be
 # followed by a delay that throttles the restart loop. Signals are forwarded.
@@ -133,4 +182,5 @@ if [ "$status" -ne 0 ] && [ "$stopping" -eq 0 ]; then
     pause "$delay"
 fi
 
+stop_watcher
 exit "$status"

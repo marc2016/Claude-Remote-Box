@@ -4,6 +4,22 @@
 
 CRB_MARKER="$CLAUDE_CONFIG_DIR/.crb-setup-done"
 CRB_STATE=/tmp/crb-state
+CRB_WATCH=/usr/local/lib/crb/crb-watch.js
+
+# crb_emit k=v ...: send one status event when reporting is configured.
+# Capped at 3 s so a dead endpoint cannot hold anything up.
+crb_emit() {
+    [ -n "${CRB_STATUS_URL:-}" ] || return 0
+    timeout 3 node "$CRB_WATCH" --emit "$@" 2>/dev/null || true
+}
+
+# crb_report_phase PHASE: the state file for the healthcheck, plus a phase
+# event. Phase changes are rare, so this one is sent in the foreground and
+# arrives before whatever the phase starts.
+crb_report_phase() {
+    echo "$1" > "$CRB_STATE" 2>/dev/null || true
+    crb_emit type=phase "phase=$1"
+}
 
 # Sessions are named <prefix>-<words>, and the default prefix is the hostname
 # (the container ID). `docker compose exec` skips the entrypoint, so setup

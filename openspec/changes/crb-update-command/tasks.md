@@ -24,4 +24,4 @@
 
 ## 5. Field test
 
-- [ ] 5.1 On the Mini-PC: replace `add-project.sh` with `crb` as the migration plan says, run `./crb update` on the installation with `janus-note-vs` and LoopTalk, choose `auto` and phone mode where offered, accept the recreate, and confirm in the Claude app that both services reconnect and that a session in `janus-note-vs` follows the phone-mode file. Run `./crb update` a second time and verify it reports nothing to do. Record the result in design.md.
+- [x] 5.1 On the Mini-PC: replace `add-project.sh` with `crb` as the migration plan says, run `./crb update` on the installation with `janus-note-vs` and LoopTalk, choose `auto` and phone mode where offered, accept the recreate, and confirm in the Claude app that both services reconnect and that a session in `janus-note-vs` follows the phone-mode file. Run `./crb update` a second time and verify it reports nothing to do. Record the result in design.md.

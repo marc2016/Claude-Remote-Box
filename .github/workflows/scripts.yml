@@ -16,10 +16,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: shellcheck
-        run: shellcheck crb tests/crb.test.sh
+        run: shellcheck crb tests/crb.test.sh tests/watch.test.sh
 
       - name: Compose version
         run: docker compose version
 
       - name: crb tests
         run: tests/crb.test.sh
+
+      - name: crb-watch tests
+        run: tests/watch.test.sh
