@@ -7,7 +7,7 @@ An interactive host script that adds a project to a claude-remote-box installati
 ## ADDED Requirements
 
 ### Requirement: Interactive prompts with defaults
-The script SHALL ask for its inputs interactively, show a default in square brackets where one exists, and accept the default on empty input. It SHALL ask for: the Git URL (optionally given as first argument instead), the service name, the clone directory, the spawn mode as a numbered choice, whether to add a browser cache, and the Git author name and email. Defaults SHALL be: the service name derived from the repository name, the clone directory `./<service name>/workspace`. The clone directory SHALL NOT contain the config directory or lie inside it, worktree spawn mode, a browser cache, and the host's global Git identity.
+The script SHALL ask for its inputs interactively, show a default in square brackets where one exists, and accept the default on empty input. It SHALL ask for: the Git URL (optionally given as first argument instead), the service name, the clone directory, the spawn mode as a numbered choice, whether to add a browser cache, and the Git author name and email. Defaults SHALL be: the service name derived from the repository name, the clone directory `./<service name>/workspace`, worktree spawn mode, a browser cache, and the host's global Git identity. The clone directory SHALL NOT contain the config directory or lie inside it.
 
 #### Scenario: Accept all defaults
 - **WHEN** the user starts the script with `git@github.com:marc2016/FlashAgenda.git` as argument and presses Enter at every prompt
@@ -38,7 +38,7 @@ The script SHALL make no change on disk before the user confirms a summary of al
 ### Requirement: Project files and directories
 After confirmation the script SHALL clone the repository into the clone directory, create `./<name>/config` with mode 700 owned by the invoking user, write `services/<name>.yaml`, and add `services/<name>.yaml` to the `include:` list of `compose.yaml`. It SHALL print each step with a counter in the style `1/4`.
 
-If the clone directory already exists, the script SHALL ask before using it without cloning, and SHALL stop if the user declines. If the config directory already exists and is not empty, the script SHALL ask before reusing it.
+If the clone directory already exists, the script SHALL clone into it when it is empty, SHALL use it without cloning and without asking when it is a Git checkout whose `origin` is the given repository (HTTPS and SSH forms count as equal), and SHALL otherwise ask before using it without cloning and ask for another clone directory if the user declines. If the config directory already exists and is not empty, the script SHALL ask before reusing it.
 
 #### Scenario: Fresh project
 - **WHEN** the user confirms the summary for a new project
@@ -47,6 +47,18 @@ If the clone directory already exists, the script SHALL ask before using it with
 #### Scenario: Existing checkout
 - **WHEN** the clone directory already contains a checkout and the user agrees to use it
 - **THEN** the script does not clone and uses that directory as `/workspace` of the new service
+
+#### Scenario: Re-run with the same repository
+- **WHEN** the script runs again after the setup files were removed, and the clone directory still holds a checkout of the same repository
+- **THEN** the script uses it without asking and keeps local changes in it
+
+#### Scenario: Empty clone directory
+- **WHEN** the clone directory exists and is empty
+- **THEN** the script clones into it without asking
+
+#### Scenario: Reuse declined
+- **WHEN** the clone directory holds other content and the user declines to use it
+- **THEN** the script asks for another clone directory
 
 ### Requirement: Generated service
 The generated service SHALL extend the shared base service from `box.yaml`, so that it gets the image, restart policy, user mapping, dropped capabilities, `no-new-privileges`, and core-dump limit defined there. It SHALL set `CRB_NAME` to the service name, set the spawn mode only when it differs from the default, set the Git identity when one was given, mount the clone directory at `/workspace` and `./<name>/config` at `/home/node/.claude`, and, when chosen, mount a named volume `<name>-browsers` at `/home/node/.cache/ms-playwright`. It SHALL mount nothing else.

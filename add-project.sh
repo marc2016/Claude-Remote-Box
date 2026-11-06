@@ -40,6 +40,25 @@ confirm_yes() {
   ! [[ "$a" =~ ^[Nn]$ ]]
 }
 
+# norm_url URL: host/path without scheme, user, trailing slash and .git, so
+# that the HTTPS and SSH forms of one repository compare equal.
+norm_url() {
+  local u=$1
+  u=${u%/}
+  u=${u%.git}
+  u=${u#*://}
+  u=${u#*@}
+  u=${u/://}
+  printf '%s' "$u" | tr '[:upper:]' '[:lower:]'
+}
+
+# same_repo DIR URL: DIR is a Git checkout whose origin is URL.
+same_repo() {
+  local origin
+  origin=$(git -C "$1" remote get-url origin 2>/dev/null) || return 1
+  [ "$(norm_url "$origin")" = "$(norm_url "$2")" ]
+}
+
 # Double-quoted YAML scalar; `$` is doubled so Compose does not interpolate it.
 yaml_str() {
   local s=$1
@@ -146,11 +165,15 @@ while :; do
       warn "$dir existiert und ist kein Ordner."
       continue
     fi
-    if confirm "$dir existiert schon. Ohne Klonen als Projektordner verwenden?"; then
+    if [ -z "$(ls -A "$dir" 2>/dev/null)" ] && [ -r "$dir" ] && [ -w "$dir" ]; then
+      echo "   $dir ist leer, das Repository wird hineingeklont."
+    elif same_repo "$dir" "$url"; then
+      echo "   $dir enthält dieses Repository schon und wird ohne Klonen verwendet."
+      reuse_dir=1
+    elif confirm "$dir existiert schon. Ohne Klonen als Projektordner verwenden?"; then
       reuse_dir=1
     else
-      echo "Abgebrochen, nichts geändert."
-      exit 1
+      continue
     fi
   fi
   break

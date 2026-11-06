@@ -86,6 +86,29 @@ check "exit 0" '[ "$(rc)" -eq 0 ]'
 check "not cloned" '[ ! -d "$WORK/existing/.git" ] && [ -f "$WORK/existing/marker" ]'
 check "mounted as workspace" '(cd "$D" && docker compose config flashagenda) | grep -q "source: $WORK/existing"'
 
+echo "Re-run after removing the setup reuses the clone"
+D="$WORK/t-rerun"; mkdir -p "$D/again"
+git clone -q "$REPO" "$D/again/workspace"
+git -C "$D/again/workspace" remote set-url origin "${REPO%.git}/"
+echo keep >"$D/again/workspace/local-change"
+run "$D" 'again\n\n\n\n\n\ny\n' "$REPO"
+check "exit 0" '[ "$(rc)" -eq 0 ]'
+check "no question, reused" '! out | grep -q "Ohne Klonen" && out | grep -q "enthält dieses Repository schon" && out | grep -q "vorhanden, wird nicht geklont"'
+check "local change kept" '[ -f "$D/again/workspace/local-change" ]'
+
+echo "Empty target directory is cloned into"
+D="$WORK/t-empty"; mkdir -p "$D/hollow/workspace"
+run "$D" 'hollow\n\n\n\n\n\ny\n' "$REPO"
+check "exit 0" '[ "$(rc)" -eq 0 ]'
+check "cloned into it" '[ -d "$D/hollow/workspace/.git" ] && ! out | grep -q "Ohne Klonen"'
+
+echo "Declined reuse asks for another directory"
+D="$WORK/t-other"; mkdir -p "$D/busy/workspace"; echo x >"$D/busy/workspace/file"
+# name, dir (default, busy), decline reuse, other dir, spawn, browsers, git name, git email, confirm
+run "$D" 'busy\n\nn\n./busy/code\n\n\n\n\ny\n' "$REPO"
+check "exit 0" '[ "$(rc)" -eq 0 ]'
+check "cloned into the other directory" '[ -d "$D/busy/code/.git" ] && [ ! -d "$D/busy/workspace/.git" ]'
+
 echo "Image tag can be overridden"
 D="$WORK/t-edge"; mkdir -p "$D"
 (cd "$D" && printf 'edge\n\n\n\n\n\ny\n' | CRB_VERSION=edge "$SCRIPT" "$REPO") >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
