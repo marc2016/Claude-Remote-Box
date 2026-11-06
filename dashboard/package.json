@@ -1,6 +1,6 @@
 {
   "name": "claude-remote-box-dashboard",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Status dashboard for claude-remote-box: one card per box, fed by the boxes' status reports.",
