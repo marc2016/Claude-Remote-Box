@@ -4,7 +4,7 @@
 
 - [x] 1.1 Rename `add-project.sh` to `crb` (git mv, mode 755) and add `main()` with subcommand dispatch (D1): `add [url]` runs the existing flow, `update` calls the new function, no or unknown subcommand prints usage and exits 64. Verify `./crb` and `./crb foo` print the usage with both subcommands and exit 64, and `./crb add <url>` starts with the service-name question.
 - [x] 1.2 Factor the permission menu, the phone-mode template, and the `environment:` line writer into functions used by `add` (D1) without changing `add`'s output. Verify by renaming `tests/add-project.test.sh` to `tests/crb.test.sh`, switching its invocations to `crb add`, and confirming every existing scenario still passes.
-- [ ] 1.3 Spike the CDN cache (D2): push a one-line comment change to `crb` on a branch, then fetch `raw.githubusercontent.com/.../<branch>/crb` with and without `?t=<epoch>` within a minute. Record in design.md whether the query string bypasses the cache; if not, add the delay sentence to the README task 4.1.
+- [x] 1.3 Spike the CDN cache (D2): push a one-line comment change to `crb` on a branch, then fetch `raw.githubusercontent.com/.../<branch>/crb` with and without `?t=<epoch>` within a minute. Record in design.md whether the query string bypasses the cache; if not, add the delay sentence to the README task 4.1.
 
 ## 2. Update flow
 

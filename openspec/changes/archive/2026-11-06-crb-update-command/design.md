@@ -73,7 +73,7 @@ Fetch the new script once by hand: `curl -fsSLO .../main/crb && chmod +x crb && 
 
 ## Open Questions
 
-- Whether `raw.githubusercontent.com` bypasses its cache for a changed query string (task 1.3). The answer changes one sentence in the README, not the design.
+None. The cache spike (task 1.3) could not be run as planned: pushing a throwaway branch from the implementation session was not permitted. Observed instead, earlier the same day: `raw.githubusercontent.com/.../main/` served the previous `add-project.sh` for several minutes after a push, so the cache is real. Whether `?t=<epoch>` bypasses it stays unverified; the README states the possible delay (the task's fallback), and the query string stays in `self_update` as a harmless attempt. The self-update also prints that the script is current or updated, so a stale fetch is visible.
 
 ## Field test
 

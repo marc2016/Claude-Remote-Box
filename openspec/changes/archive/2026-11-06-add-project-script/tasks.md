@@ -24,4 +24,4 @@
 
 ## 5. Field test
 
-- [ ] 5.1 On the mini PC, add FlashAgenda with the script next to the existing LoopTalk service, then `docker compose up -d flashagenda` and run setup. Verify that LoopTalk keeps running unchanged, FlashAgenda connects in the Claude app as `flashagenda`, and record the result in design.md.
+- [x] 5.1 On the mini PC, add FlashAgenda with the script next to the existing LoopTalk service, then `docker compose up -d flashagenda` and run setup. Verify that LoopTalk keeps running unchanged, FlashAgenda connects in the Claude app as `flashagenda`, and record the result in design.md.

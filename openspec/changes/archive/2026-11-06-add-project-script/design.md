@@ -75,3 +75,8 @@ Values that come from the user (Git name, email, paths) are written double-quote
 ## Migration Plan
 
 No migration. Existing setups keep working. Users who want the new layout run the script for new projects; moving old services into `services/` by hand is described briefly in the README.
+
+## Field test
+
+2026-11-06, Mini-PC: the script (as `add-project.sh`, later `crb add`) added `janus-note-vs` next to the existing LoopTalk service in place of the planned FlashAgenda; `docker compose up -d janus-note-vs` and `setup` connected it in the Claude app under that name, LoopTalk kept running unchanged. Recorded in `guided-setup` design.md as well. The same run surfaced the empty root-owned `workspace` directory Docker leaves behind, which the script now replaces.
+
