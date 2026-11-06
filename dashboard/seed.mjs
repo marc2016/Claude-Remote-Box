@@ -7,6 +7,7 @@ const base = process.argv[2] || 'http://127.0.0.1:8080';
 const token = process.env.CRB_STATUS_TOKEN || 'dev';
 const seqs = {};
 const now = () => new Date().toISOString();
+const yesterday = () => new Date(Date.now() - 26 * 3600 * 1000).toISOString();
 const ev = (box, type, extra = {}) => ({ box, ts: now(), seq: (seqs[box] = (seqs[box] || 0) + 1), type, ...extra });
 
 async function post(events) {
@@ -42,11 +43,11 @@ await post([
   ev('flashagenda', 'phase', { phase: 'waiting-setup' }), hb('flashagenda', 'waiting-setup'),
 
   ev('archiv', 'phase', { phase: 'running' }), hb('archiv', 'running'),
-  ev('archiv', 'session_start', { session: 'sess-archiv-1', cwd: '/workspace', branch: 'main', permission_mode: 'default' }),
-  ev('archiv', 'prompt', { session: 'sess-archiv-1', text: 'Changelog für 0.2.0 schreiben' }),
-  ev('archiv', 'reply', { session: 'sess-archiv-1', text: 'Erledigt, der Changelog steht in CHANGELOG.md.' }),
-  ev('archiv', 'summary', { session: 'sess-archiv-1', model: 'claude-haiku-5-5', tokens_in: 40, tokens_out: 900, cache_read: 20000, cache_write: 0, context: 12000, turns: 2, tool_calls: 3, started: now(), last: now() }),
-  ev('archiv', 'session_end', { session: 'sess-archiv-1', reason: 'idle' }),
+  { ...ev('archiv', 'session_start', { session: 'sess-archiv-1', cwd: '/workspace', branch: 'main', permission_mode: 'default' }), ts: yesterday() },
+  { ...ev('archiv', 'prompt', { session: 'sess-archiv-1', text: 'Changelog für 0.2.0 schreiben' }), ts: yesterday() },
+  { ...ev('archiv', 'reply', { session: 'sess-archiv-1', text: 'Erledigt, der Changelog steht in CHANGELOG.md.' }), ts: yesterday() },
+  { ...ev('archiv', 'summary', { session: 'sess-archiv-1', model: 'claude-haiku-5-5', tokens_in: 40, tokens_out: 900, cache_read: 20000, cache_write: 0, context: 12000, turns: 2, tool_calls: 3, started: yesterday(), last: yesterday() }), ts: yesterday() },
+  { ...ev('archiv', 'session_end', { session: 'sess-archiv-1', reason: 'idle' }), ts: yesterday() },
 ]);
 console.log(`seeded ${base}; heartbeats every 30 s, Ctrl-C to stop`);
 

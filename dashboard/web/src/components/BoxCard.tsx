@@ -94,8 +94,8 @@ function SessionBlock({ s, now, up }: { s: SessionCard; now: number; up: boolean
       )}
 
       <div className="flex flex-col gap-1.5">
-        <div className="flex items-baseline justify-between gap-2 text-sm">
-          <span className="min-w-0 truncate font-medium" title={s.id}>{s.label}</span>
+        <div className="flex items-baseline justify-between gap-2 text-sm" title={s.label !== s.id ? s.label : undefined}>
+          <span className="text-muted-foreground min-w-0 truncate text-xs">{sessionAge(s, now)}</span>
           {s.model && <span className="text-muted-foreground shrink-0 text-xs">{modelLabel(s.model)}</span>}
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -125,6 +125,16 @@ function SessionBlock({ s, now, up }: { s: SessionCard; now: number; up: boolean
       </div>
     </>
   );
+}
+
+// "seit 2 h", plus "zuletzt <day time>" when the last activity was not today.
+function sessionAge(s: SessionCard, now: number): string {
+  const parts: string[] = [];
+  if (s.started) parts.push(`seit ${fmtDuration(now - Date.parse(s.started))}`);
+  if (s.last_activity && new Date(s.last_activity).toDateString() !== new Date(now).toDateString()) {
+    parts.push(`zuletzt ${fmtTime(s.last_activity)}`);
+  }
+  return parts.join(' · ');
 }
 
 // The stage: Clawd acts out the state, the activity text stands to his right.
