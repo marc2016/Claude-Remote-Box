@@ -1,13 +1,18 @@
 import type { BoxesResponse, TimelineEvent } from '@shared/types';
 
+export const PAGE_SIZE = 200;
+
 export async function fetchBoxes(): Promise<BoxesResponse> {
   const r = await fetch('/api/boxes', { cache: 'no-store' });
   if (!r.ok) throw new Error(`boxes: ${r.status}`);
   return r.json();
 }
 
-export async function fetchTimeline(session: string, limit = 200): Promise<TimelineEvent[]> {
-  const r = await fetch(`/api/sessions/${encodeURIComponent(session)}/events?limit=${limit}`, { cache: 'no-store' });
+/** Newest `limit` entries of a session, oldest first; `before` pages backwards by seq. */
+export async function fetchTimeline(session: string, limit = PAGE_SIZE, before?: number): Promise<TimelineEvent[]> {
+  const q = new URLSearchParams({ limit: String(limit) });
+  if (before != null) q.set('before', String(before));
+  const r = await fetch(`/api/sessions/${encodeURIComponent(session)}/events?${q}`, { cache: 'no-store' });
   if (!r.ok) throw new Error(`events: ${r.status}`);
   const j = await r.json();
   return j.events as TimelineEvent[];

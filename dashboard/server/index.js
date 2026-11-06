@@ -51,7 +51,9 @@ export function createServer(store, options = {}) {
       const m = req.method === 'GET' && /^\/api\/sessions\/([^/]+)\/events$/.exec(p);
       if (m) {
         const limit = Math.min(1000, Math.max(1, parseInt(url.searchParams.get('limit') || '200', 10) || 200));
-        return json(res, 200, { session: decodeURIComponent(m[1]), events: store.sessionEvents(decodeURIComponent(m[1]), limit, TIMELINE_TYPES) });
+        const beforeRaw = url.searchParams.get('before');
+        const before = beforeRaw != null && /^\d+$/.test(beforeRaw) ? parseInt(beforeRaw, 10) : null;
+        return json(res, 200, { session: decodeURIComponent(m[1]), events: store.sessionEvents(decodeURIComponent(m[1]), limit, TIMELINE_TYPES, before) });
       }
       if (req.method === 'GET' && p === '/api/health') return json(res, 200, { ok: true });
       if (p.startsWith('/api/')) return json(res, 404, { error: 'not found' });
@@ -122,6 +124,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   if (pruned.events || pruned.sessions) console.log(`pruned ${pruned.events} events, ${pruned.sessions} sessions`);
   setInterval(() => store.prune(), PRUNE_EVERY_MS).unref();
   const server = createServer(store);
+  server.on('error', (e) => {
+    if (e && e.code === 'EADDRINUSE') console.error(`port ${cfg.port} is in use; pick another one with PORT=<n>`);
+    else console.error('server failed', e);
+    process.exit(1);
+  });
   server.listen(cfg.port, cfg.host, () => console.log(`dashboard on http://${cfg.host}:${cfg.port}`));
   const stop = () => { for (const c of server.clients) c.end(); server.closeAllConnections(); server.close(); store.close(); process.exit(0); };
   process.on('SIGTERM', stop);

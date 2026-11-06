@@ -29,7 +29,10 @@ let seed = null;
 const stop = () => { seed?.kill(); server.kill(); process.exit(0); };
 process.on('SIGINT', stop);
 process.on('SIGTERM', stop);
-server.on('exit', (code) => { console.error(`server exited (${code})`); seed?.kill(); process.exit(code ?? 1); });
+server.on('exit', (code) => {
+  console.error(`server exited (${code}). Node ${process.version}; node:sqlite needs 22.13+. Port busy? Try PORT=8091 npm run demo`);
+  seed?.kill(); process.exit(code ?? 1);
+});
 
 for (let i = 0; i < 50; i++) {
   try { if ((await fetch(`${base}/api/health`)).ok) break; } catch { /* not yet */ }

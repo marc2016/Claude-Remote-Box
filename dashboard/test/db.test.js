@@ -110,6 +110,22 @@ test('last tool call is kept, old databases get the column', () => {
   upgraded.close();
 });
 
+test('session events page backwards with before', () => {
+  const store = openDb(':memory:');
+  const batch = [];
+  for (let i = 1; i <= 500; i++) batch.push({ box: 'b1', seq: i, ts: iso(i), type: i % 2 ? 'prompt' : 'reply', session: 'big', text: `m${i}` });
+  store.ingest(batch, new Date(T0));
+  const newest = store.sessionEvents('big', 200);
+  assert.equal(newest.length, 200);
+  assert.equal(newest[0].seq, 301);
+  assert.equal(newest[199].seq, 500);
+  const older = store.sessionEvents('big', 200, null, 301);
+  assert.equal(older.length, 200);
+  assert.equal(older[0].seq, 101);
+  assert.equal(older[199].seq, 300);
+  assert.equal(store.sessionEvents('big', 200, null, 101).length, 100);
+});
+
 test('events outside the contract are stored but harmless', () => {
   const store = openDb(':memory:');
   store.ingest([ev('mystery', { session: 's1', foo: 1 }), { nonsense: true }, ev('prompt', { session: 's1', text: 'ok' })], new Date(T0));

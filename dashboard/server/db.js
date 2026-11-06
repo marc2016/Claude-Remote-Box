@@ -155,10 +155,11 @@ export class Store {
     return this.db.prepare('SELECT * FROM sessions WHERE box = ? AND sidechain = 0 ORDER BY COALESCE(last_activity, last, started) DESC').all(box);
   }
 
-  sessionEvents(session, limit = 200, types = null) {
-    const where = types ? ` AND type IN (${types.map(() => '?').join(',')})` : '';
-    const rows = this.db.prepare(`SELECT json FROM events WHERE session = ?${where} ORDER BY seq DESC LIMIT ?`)
-      .all(session, ...(types ?? []), limit);
+  /** Newest `limit` events of a session, oldest first; `before` (a seq) pages backwards. */
+  sessionEvents(session, limit = 200, types = null, before = null) {
+    const where = (types ? ` AND type IN (${types.map(() => '?').join(',')})` : '') + (before != null ? ' AND seq < ?' : '');
+    const params = [session, ...(types ?? []), ...(before != null ? [before] : []), limit];
+    const rows = this.db.prepare(`SELECT json FROM events WHERE session = ?${where} ORDER BY seq DESC LIMIT ?`).all(...params);
     return rows.map((r) => JSON.parse(r.json)).reverse();
   }
 

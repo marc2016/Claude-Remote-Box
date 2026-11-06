@@ -15,6 +15,13 @@ async function post(events) {
   if (!r.ok) throw new Error(`ingest ${r.status}`);
 }
 
+// Wait for the server (npm run dev starts both at once).
+for (let i = 0; i < 100; i++) {
+  try { if ((await fetch(`${base}/api/health`)).ok) break; } catch { /* not yet */ }
+  if (i === 99) { console.error(`seed: no server at ${base}`); process.exit(1); }
+  await new Promise((r) => setTimeout(r, 100));
+}
+
 const hb = (box, phase) => ev(box, 'heartbeat', { phase, image: '0.3.0', claude_version: '2.1.316', spawn: 'worktree', uptime_s: 7300 });
 
 await post([

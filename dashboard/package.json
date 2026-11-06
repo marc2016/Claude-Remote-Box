@@ -4,14 +4,16 @@
   "private": true,
   "type": "module",
   "description": "Status dashboard for claude-remote-box: one card per box, fed by the boxes' status reports.",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node server/index.js",
-    "dev": "concurrently -k \"node server/index.js\" \"vite --config web/vite.config.ts\"",
+    "dev": "CRB_STATUS_TOKEN=dev DATA_DIR=.data HOST=127.0.0.1 concurrently -k -n server,vite,seed -c blue,magenta,green \"node server/index.js\" \"vite --config web/vite.config.ts\" \"node seed.mjs\"",
     "build": "vite build --config web/vite.config.ts",
     "typecheck": "tsc -p web/tsconfig.json --noEmit",
     "test": "node --test test/",
-    "seed": "node seed.mjs",
+    "seed": "CRB_STATUS_TOKEN=${CRB_STATUS_TOKEN:-dev} node seed.mjs",
     "demo": "node demo.mjs"
   },
   "devDependencies": {
@@ -32,5 +34,11 @@
     "tailwindcss": "4.3.5",
     "typescript": "7.0.2",
     "vite": "8.3.6"
+  },
+  "dependencies": {
+    "@shadcn/react": "0.3.1",
+    "cn": "0.5.2",
+    "radix-ui": "1.8.1",
+    "streamdown": "2.7.1"
   }
 }
