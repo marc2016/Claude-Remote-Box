@@ -14,6 +14,8 @@
 
 - [ ] 2.5 Add the `git` event (spec "Git state"): on each heartbeat run `git worktree list --porcelain`, and per worktree `git rev-list --count <default>..HEAD`, `git status --porcelain`, `git diff --shortstat <default>...HEAD`, `git log -1 --format=%s%x00%cI`, all read-only with a 5 s timeout; skip when `/workspace` is not a repository. Verify in `tests/watch.test.sh` with a temporary repository that has one worktree with two commits and a modified file: the event lists both checkouts with the expected `ahead`, `dirty`, branch, and subject; and that a plain directory produces no `git` event.
 
+- [x] 2.6 Run identity and resume (spec "Run identity and resume", added by `watcher-run-identity`): run id in every event, state file in the config directory, resume from offsets, summaries-only backfill without state, emit namespace. Verified in `tests/watch.test.sh` (restart continues seq without re-sending, fresh state gives a new run and summaries only).
+
 ## 3. Entrypoint and image
 
 - [x] 3.1 Add `crb_report_phase` to `crb-common.sh` and use it for every phase change (D5); send heartbeats from the waiting loops. Verify with the fake `claude` and `tests/receiver.js`: a box without login reports `waiting-setup` and heartbeats; after the marker appears, `running` arrives before the fake server's first output.

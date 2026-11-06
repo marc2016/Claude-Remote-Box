@@ -42,10 +42,10 @@ echo "Emit and heartbeat through the receiver"
 node "$RECV" "$PORT" "$OUT" secret 2>/dev/null & pids+=($!)
 sleep 0.5
 CFG="$WORK/cfg"; mkdir -p "$CFG/projects/-workspace"
-export CRB_STATUS_URL="http://127.0.0.1:$PORT/api/ingest" CRB_STATUS_TOKEN=secret CRB_NAME=testbox CLAUDE_CONFIG_DIR="$CFG" CRB_STATE="$WORK/state" CRB_SPOOL="$WORK/spool.jsonl" CRB_SEQ="$WORK/seq" CRB_IMAGE_VERSION=test
+export CRB_STATUS_URL="http://127.0.0.1:$PORT/api/ingest" CRB_STATUS_TOKEN=secret CRB_NAME=testbox CLAUDE_CONFIG_DIR="$CFG" CRB_STATE="$WORK/state" CRB_SPOOL="$WORK/spool.jsonl" CRB_EMIT_SEQ="$WORK/emit-seq" CRB_IMAGE_VERSION=test
 echo waiting-setup >"$WORK/state"
 node "$WATCH" --emit type=phase phase=waiting-setup
-check "phase event with token" 'events | grep -q "\"type\":\"phase\",\"phase\":\"waiting-setup\"" && grep -q "\"authorization\":\"Bearer secret\"" "$OUT" && events | grep -q "\"box\":\"testbox\""'
+check "phase event with token and emit run suffix" 'events | grep -q "\"type\":\"phase\",\"phase\":\"waiting-setup\"" && grep -q "\"authorization\":\"Bearer secret\"" "$OUT" && events | grep -q "\"box\":\"testbox\"" && events | grep -qE "\"run\":\"[0-9a-f]{8}\\.e\"" && [ -f "$CFG/.crb-watch.json" ]'
 node "$WATCH" --emit type=heartbeat
 check "heartbeat carries phase and image" 'events | grep "\"type\":\"heartbeat\"" | grep -q "\"phase\":\"waiting-setup\"" && events | grep "\"type\":\"heartbeat\"" | grep -q "\"image\":\"test\""'
 : >"$OUT"
@@ -68,7 +68,7 @@ sleep 1
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 printf '{"type":"user","sessionId":"live","cwd":"/workspace","timestamp":"%s","message":{"role":"user","content":"hallo"}}\n' "$(now)" >>"$T"
 printf '{"type":"assistant","sessionId":"live","timestamp":"%s","message":{"role":"assistant","model":"m","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"sleep 30"}}],"usage":{"input_tokens":1,"output_tokens":1}}}\n' "$(now)" >>"$T"
-check "prompt and tool arrive" 'waitfor "\"type\":\"tool\"" 10 && events | grep -q "\"type\":\"prompt\"" && events | grep -q "\"text\":\"hallo\""'
+check "prompt and tool arrive, with run id" 'waitfor "\"type\":\"tool\"" 10 && events | grep -q "\"type\":\"prompt\"" && events | grep -q "\"text\":\"hallo\"" && events | grep "\"type\":\"prompt\"" | grep -qE "\"run\":\"[0-9a-f]{8}\""'
 check "waiting after ~10s" 'waitfor "\"type\":\"waiting\"" 15 && events | grep "\"type\":\"waiting\"" | grep -q "\"summary\":\"sleep 30\""'
 printf '{"type":"user","sessionId":"live","timestamp":"%s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"done"}]}}\n' "$(now)" >>"$T"
 check "resumed after result" 'waitfor "\"type\":\"resumed\"" 10 && events | grep -q "\"type\":\"tool_result\",\"session\":\"live\",\"call_id\":\"c1\",\"ok\":true"'
@@ -98,14 +98,22 @@ check "no heartbeat in spool" '! grep -q heartbeat "$WORK/spool.jsonl"'
 kill "${pids[2]}" 2>/dev/null; sleep 0.5
 rm -f "$OUT.pause" "$WORK/spool.jsonl"
 
-echo "Backfill: old session gives a summary only"
+echo "Restart: resumes from saved state, unknown transcript gives a summary only"
 : >"$OUT"; rm -f "$WORK/spool.jsonl"
+RUN1=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).run)' "$CFG/.crb-watch.json")
 OLD="$CFG/projects/-workspace/old.jsonl"
 printf '{"type":"user","sessionId":"old","timestamp":"2020-01-01T00:00:00Z","message":{"role":"user","content":"alt"}}\n{"type":"assistant","sessionId":"old","timestamp":"2020-01-01T00:00:05Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"antwort"}],"usage":{"input_tokens":3,"output_tokens":4}}}\n' >"$OLD"
 node "$WATCH" 2>>"$WORK/watch.log" & pids+=($!)
 check "old: summary with backfill, no prompt" 'waitfor "\"backfill\":true" 10 && ! events | grep -q "\"text\":\"alt\"" && events | grep "\"session\":\"old\"" | grep -q "\"turns\":1"'
-check "live file re-read fully: prompt msg 20 present" 'waitfor "msg 20" 10'
-kill "${pids[3]}" 2>/dev/null
+printf '{"type":"user","sessionId":"live","timestamp":"%s","message":{"role":"user","content":"nach dem neustart"}}\n' "$(now)" >>"$T"
+check "known file resumed: new line arrives, old lines not re-sent, same run, seq continues" 'waitfor "nach dem neustart" 10 && ! events | grep -q "msg 20" && events | grep "nach dem neustart" | grep -q "\"run\":\"$RUN1\"" && [ "$(events | grep "nach dem neustart" | node -e "let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>console.log(JSON.parse(s).seq))")" -gt 700 ]'
+kill "${pids[3]}" 2>/dev/null; sleep 0.5
+
+echo "Fresh state: new run id, existing transcripts summarized only"
+: >"$OUT"; rm -f "$CFG/.crb-watch.json"
+node "$WATCH" 2>>"$WORK/watch.log" & pids+=($!)
+check "summaries only, new run" 'waitfor "\"session\":\"live\"" 10 && ! events | grep -q "\"text\":" && events | grep "\"session\":\"live\"" | grep -q "\"backfill\":true" && ! events | grep -q "\"run\":\"$RUN1\""'
+kill "${pids[4]}" 2>/dev/null
 
 echo ""
 if [ "$fails" -eq 0 ]; then echo "All tests passed."; else echo "$fails test(s) failed."; exit 1; fi

@@ -12,6 +12,8 @@
 // Environment: CRB_STATUS_URL (off when empty), CRB_STATUS_TOKEN, CRB_NAME,
 // CLAUDE_CONFIG_DIR, CRB_STATE (phase file), CRB_SPAWN_EFFECTIVE,
 // CRB_IMAGE_VERSION, CRB_SPOOL (default /tmp/crb-spool.jsonl).
+// State (run id, sequence counter, read offsets) lives in
+// $CLAUDE_CONFIG_DIR/.crb-watch.json, so it survives a container recreation.
 'use strict';
 
 const fs = require('fs');
@@ -32,7 +34,7 @@ const SCAN_MS = 5000;
 const HEARTBEAT_MS = 30000;
 const WAITING_MS = 10000;
 const IDLE_END_MS = 60 * 60 * 1000;
-const BACKFILL_MS = 24 * 60 * 60 * 1000;
+const STATE_SAVE_MS = 5000;
 
 const env = process.env;
 const cfg = {
@@ -42,7 +44,7 @@ const cfg = {
   configDir: env.CLAUDE_CONFIG_DIR || path.join(env.HOME || '/home/node', '.claude'),
   stateFile: env.CRB_STATE || '/tmp/crb-state',
   spoolFile: env.CRB_SPOOL || '/tmp/crb-spool.jsonl',
-  seqFile: env.CRB_SEQ || '/tmp/crb-seq',
+  emitSeqFile: env.CRB_EMIT_SEQ || '/tmp/crb-emit-seq',
   spawn: env.CRB_SPAWN_EFFECTIVE || env.CRB_SPAWN || '',
   image: env.CRB_IMAGE_VERSION || 'unknown',
 };
@@ -95,13 +97,43 @@ function toolSummary(name, input) {
   return truncate(oneLine(s), SUMMARY_LIMIT);
 }
 
-// --- sequence numbers ---------------------------------------------------------
+// --- state: run id, sequence counter, read offsets -----------------------------
+
+const stateFile = path.join(cfg.configDir, '.crb-watch.json');
+const state = { run: null, seq: 0, files: {} };
+let stateDirty = false;
+let stateFresh = true; // no saved state at start: existing transcripts are backfill only
+let stateWarned = false;
+
+function loadState() {
+  try {
+    const d = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    if (d && typeof d.run === 'string' && d.run) {
+      state.run = d.run;
+      state.seq = Number.isFinite(d.seq) ? d.seq : 0;
+      state.files = d.files && typeof d.files === 'object' ? d.files : {};
+      stateFresh = false;
+    }
+  } catch { /* no state yet */ }
+  if (!state.run) { state.run = require('crypto').randomBytes(4).toString('hex'); stateDirty = true; }
+}
+
+function saveState() {
+  if (!stateDirty) return;
+  try {
+    fs.writeFileSync(stateFile + '.tmp', JSON.stringify(state));
+    fs.renameSync(stateFile + '.tmp', stateFile);
+    stateDirty = false;
+  } catch (e) {
+    if (!stateWarned) { log(`cannot write ${stateFile} (${e.message}); state is kept in memory only`); stateWarned = true; }
+  }
+}
 
 let seq = 0;
-try { seq = parseInt(fs.readFileSync(cfg.seqFile, 'utf8'), 10) || 0; } catch { /* fresh */ }
 function nextSeq() {
-  seq += 1;
-  if (seq % 20 === 0) { try { fs.writeFileSync(cfg.seqFile, String(seq)); } catch { /* best effort */ } }
+  state.seq += 1;
+  seq = state.seq;
+  stateDirty = true;
   return seq;
 }
 
@@ -117,7 +149,7 @@ let dryRun = false;
 const dryOut = [];
 
 function emit(ev) {
-  const full = Object.assign({ box: cfg.box, ts: ev.ts || new Date().toISOString(), seq: nextSeq() }, ev);
+  const full = Object.assign({ box: cfg.box, run: state.run, ts: ev.ts || new Date().toISOString(), seq: nextSeq() }, ev);
   if (dryRun) { dryOut.push(full); return; }
   queue.push(full);
   if (queue.length >= BATCH_MAX) flush();
@@ -352,9 +384,7 @@ function readNew(p, f, live) {
         if (!line.trim()) continue;
         let d;
         try { d = JSON.parse(line); } catch { f.badLines = (f.badLines || 0) + 1; continue; }
-        const lineTs = typeof d.timestamp === 'string' ? Date.parse(d.timestamp) : NaN;
-        const isLive = live && !(Number.isFinite(lineTs) && Date.now() - lineTs > BACKFILL_MS);
-        handleLine(f.session, d, isLive);
+        handleLine(f.session, d, live);
       }
     }
     f.offset = pos;
@@ -368,16 +398,22 @@ function scan(initial) {
     if (!f) {
       f = { offset: 0, rest: '', session: path.basename(p, '.jsonl') };
       files.set(p, f);
-      readNew(p, f, !initial || true);
-      if (initial) {
-        // Old sessions: only a summary, flagged as backfill.
+      if (!initial) { readNew(p, f, true); continue; } // a session that appeared after start: live
+      const saved = state.files[p];
+      if (Number.isFinite(saved) && saved > 0) {
+        // Known file: resume where the previous run stopped.
+        f.offset = saved;
+        readNew(p, f, true);
+      } else {
+        // Unknown at start: aggregate only, report a summary; live events start after this point.
+        readNew(p, f, false);
         const s = sessions.get(f.session);
-        if (s && s.started && !s.announced) { /* never happens: announced on first line */ }
-        if (s && s.last && Date.now() - Date.parse(s.last) > BACKFILL_MS) emit(summaryEvent(s, { backfill: true }));
+        if (s && s.started) emit(summaryEvent(s, { backfill: true }));
       }
     } else {
       readNew(p, f, true);
     }
+    if (state.files[p] !== f.offset) { state.files[p] = f.offset; stateDirty = true; }
   }
 }
 
@@ -426,6 +462,7 @@ async function main() {
 
   if (args[0] === '--dry-run') {
     dryRun = true;
+    state.run = 'dry';
     for (const p of args.slice(1)) {
       const f = { offset: 0, rest: '', session: path.basename(p, '.jsonl') };
       readNew(p, f, true);
@@ -435,6 +472,7 @@ async function main() {
   }
 
   if (args[0] === '--hook') {
+    loadState();
     // Claude Code Notification hook. Always logs (for the spike), emits only
     // for permission prompts when reporting is configured.
     let raw = '';
@@ -460,6 +498,14 @@ async function main() {
 
   if (args[0] === '--emit') {
     if (!cfg.url) return;
+    // Own counter and run suffix: these one-shot processes must not race the daemon.
+    loadState(); saveState();
+    let eseq = 0;
+    try { eseq = parseInt(fs.readFileSync(cfg.emitSeqFile, 'utf8'), 10) || 0; } catch { /* fresh */ }
+    eseq += 1;
+    try { fs.writeFileSync(cfg.emitSeqFile, String(eseq)); } catch { /* best effort */ }
+    state.run = `${state.run}.e`;
+    state.seq = eseq - 1;
     const ev = parseKv(args.slice(1));
     if (ev.type === 'heartbeat') {
       Object.assign(ev, { uptime_s: containerUptimeS(), image: cfg.image, claude_version: claudeVersion(), spawn: cfg.spawn || null });
@@ -472,16 +518,19 @@ async function main() {
 
   if (!cfg.url) { log('CRB_STATUS_URL is not set, nothing to do'); return; }
   if (!cfg.token) log('CRB_STATUS_TOKEN is empty, sending without a token');
-  log(`reporting ${cfg.box} to ${cfg.url}`);
+  loadState();
+  log(`reporting ${cfg.box} to ${cfg.url} (run ${state.run}${stateFresh ? ', fresh state' : ''})`);
 
   scan(true);
+  saveState();
   heartbeat();
   setInterval(() => scan(false), SCAN_MS);
   setInterval(checkWaiting, 1000);
   setInterval(heartbeat, HEARTBEAT_MS);
   setInterval(flush, BATCH_MS);
+  setInterval(saveState, STATE_SAVE_MS);
 
-  const stop = () => { flush().finally(() => process.exit(0)); setTimeout(() => process.exit(0), SEND_TIMEOUT_MS + 500); };
+  const stop = () => { saveState(); flush().finally(() => process.exit(0)); setTimeout(() => process.exit(0), SEND_TIMEOUT_MS + 500); };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
 }

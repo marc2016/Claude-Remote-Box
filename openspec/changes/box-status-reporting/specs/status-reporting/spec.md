@@ -83,6 +83,17 @@ A send SHALL time out after 2 s and SHALL never delay a session or the server. E
 - **WHEN** the endpoint stays down while 700 events are produced
 - **THEN** the spool holds the newest 500, and the log notes the loss once
 
+### Requirement: Run identity and resume
+Every event SHALL carry a run id that identifies one run of the box's reporting: a random id generated when the watcher first starts without saved state. The watcher SHALL persist its run id, sequence counter and per-transcript read offsets in the config directory and SHALL resume from them after a restart, so that lines already reported are not sent again. When no saved state exists, transcripts present at start SHALL be reported as summaries only and live events SHALL begin with lines appended after start. Entrypoint events sent outside the watcher SHALL carry the same run id with a suffix and their own counter, so their sequence numbers never collide with the watcher's.
+
+#### Scenario: Container recreated
+- **WHEN** a box container is recreated with its config directory intact
+- **THEN** its first events after the restart carry the saved run id and sequence numbers that continue the old ones, and no prompt or reply is reported twice
+
+#### Scenario: Fresh config
+- **WHEN** a box starts with a config directory that holds transcripts but no watcher state
+- **THEN** it reports with a new run id, one summary per existing session, and full events only for new lines
+
 ### Requirement: Watcher supervision
 The entrypoint SHALL start the watcher before the server and SHALL restart it with a delay when it exits, without affecting the server. A stop request SHALL end the watcher together with the server. The watcher SHALL NOT run when the container was started with an explicit command.
 

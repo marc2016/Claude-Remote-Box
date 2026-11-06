@@ -126,6 +126,35 @@ test('session events page backwards with before', () => {
   assert.equal(store.sessionEvents('big', 200, null, 101).length, 100);
 });
 
+test('a new run with repeated sequence numbers is stored, old run replays are not', () => {
+  const store = openDb(':memory:');
+  const a = [{ box: 'b1', run: 'aaaa', seq: 1, ts: iso(0), type: 'heartbeat', phase: 'running' }, { box: 'b1', run: 'aaaa', seq: 2, ts: iso(1), type: 'phase', phase: 'running' }];
+  assert.deepEqual(store.ingest(a, new Date(T0)), ['b1']);
+  assert.deepEqual(store.ingest(a, new Date(T0 + 1000)), [], 'replay of the same run');
+  const b = [{ box: 'b1', run: 'bbbb', seq: 1, ts: iso(200), type: 'heartbeat', phase: 'running' }];
+  assert.deepEqual(store.ingest(b, new Date(T0 + 200000)), ['b1'], 'new run, same seq');
+  assert.equal(store.db.prepare('SELECT COUNT(*) c FROM events').get().c, 3);
+  assert.equal(buildCards(store, T0 + 230000).boxes[0].up, true, 'heartbeat of the new run counts');
+  assert.deepEqual(store.ingest([{ box: 'b1', seq: 1, ts: iso(300), type: 'phase', phase: 'running' }], new Date(T0)), ['b1']);
+  assert.deepEqual(store.ingest([{ box: 'b1', seq: 1, ts: iso(300), type: 'phase', phase: 'running' }], new Date(T0)), []);
+});
+
+test('old events table is rebuilt with the run column and keeps its rows', () => {
+  const { DatabaseSync } = require_sqlite();
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'crb-db-')), 'old.sqlite');
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE events (box TEXT NOT NULL, seq INTEGER NOT NULL, session TEXT, ts TEXT NOT NULL, type TEXT NOT NULL, json TEXT NOT NULL, received TEXT NOT NULL, PRIMARY KEY (box, seq));
+    INSERT INTO events VALUES ('b1', 1, 's1', '${iso(0)}', 'prompt', '{"box":"b1","seq":1,"type":"prompt","session":"s1","text":"alt"}', '${iso(0)}');`);
+  old.close();
+  const store = openDb(file);
+  assert.deepEqual(store.db.prepare('PRAGMA table_info(events)').all().map((c) => c.name), ['box', 'run', 'seq', 'session', 'ts', 'type', 'json', 'received']);
+  assert.equal(store.sessionEvents('s1').length, 1);
+  assert.equal(store.sessionEvents('s1')[0].id, 1);
+  assert.deepEqual(store.ingest([{ box: 'b1', run: 'new1', seq: 1, ts: iso(5), type: 'prompt', session: 's1', text: 'neu' }], new Date(T0)), ['b1']);
+  assert.equal(store.sessionEvents('s1').length, 2);
+  store.close();
+});
+
 test('events outside the contract are stored but harmless', () => {
   const store = openDb(':memory:');
   store.ingest([ev('mystery', { session: 's1', foo: 1 }), { nonsense: true }, ev('prompt', { session: 's1', text: 'ok' })], new Date(T0));

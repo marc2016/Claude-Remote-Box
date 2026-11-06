@@ -11,11 +11,11 @@ export function openDb(file) {
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
     CREATE TABLE IF NOT EXISTS events (
-      box TEXT NOT NULL, seq INTEGER NOT NULL, session TEXT, ts TEXT NOT NULL,
+      box TEXT NOT NULL, run TEXT NOT NULL DEFAULT '', seq INTEGER NOT NULL, session TEXT, ts TEXT NOT NULL,
       type TEXT NOT NULL, json TEXT NOT NULL, received TEXT NOT NULL,
-      PRIMARY KEY (box, seq)
+      PRIMARY KEY (box, run, seq)
     );
-    CREATE INDEX IF NOT EXISTS events_session ON events (session, seq);
+    CREATE INDEX IF NOT EXISTS events_session ON events (session);
     CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY, box TEXT NOT NULL, label TEXT, model TEXT,
@@ -37,6 +37,25 @@ export function openDb(file) {
   // Columns added after the first release, for databases created before them.
   const cols = db.prepare('PRAGMA table_info(sessions)').all().map((c) => c.name);
   if (!cols.includes('last_tool')) db.exec('ALTER TABLE sessions ADD COLUMN last_tool TEXT');
+  // Events keyed by (box, seq) only: rebuild with the run id in the key (old rows keep run '').
+  const ecols = db.prepare('PRAGMA table_info(events)').all().map((c) => c.name);
+  if (!ecols.includes('run')) {
+    db.exec(`
+      BEGIN;
+      ALTER TABLE events RENAME TO events_old;
+      CREATE TABLE events (
+        box TEXT NOT NULL, run TEXT NOT NULL DEFAULT '', seq INTEGER NOT NULL, session TEXT, ts TEXT NOT NULL,
+        type TEXT NOT NULL, json TEXT NOT NULL, received TEXT NOT NULL,
+        PRIMARY KEY (box, run, seq)
+      );
+      INSERT INTO events (box, run, seq, session, ts, type, json, received)
+        SELECT box, '', seq, session, ts, type, json, received FROM events_old ORDER BY received, seq;
+      DROP TABLE events_old;
+      CREATE INDEX IF NOT EXISTS events_session ON events (session);
+      CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
+      COMMIT;
+    `);
+  }
   return new Store(db);
 }
 
@@ -44,7 +63,7 @@ export class Store {
   constructor(db) {
     this.db = db;
     this.insertEvent = db.prepare(
-      'INSERT OR IGNORE INTO events (box, seq, session, ts, type, json, received) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      'INSERT OR IGNORE INTO events (box, run, seq, session, ts, type, json, received) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
     this.upsertBox = db.prepare(`INSERT INTO boxes (name, updated) VALUES (?, ?)
       ON CONFLICT(name) DO UPDATE SET updated = excluded.updated`);
     this.ensureSession = db.prepare(`INSERT OR IGNORE INTO sessions (id, box) VALUES (?, ?)`);
@@ -63,7 +82,8 @@ export class Store {
       for (const ev of events) {
         if (!ev || typeof ev !== 'object' || typeof ev.box !== 'string' || typeof ev.seq !== 'number' || typeof ev.type !== 'string') continue;
         const ts = typeof ev.ts === 'string' ? ev.ts : received;
-        const r = this.insertEvent.run(ev.box, ev.seq, ev.session ?? null, ts, ev.type, JSON.stringify(ev), received);
+        const run = typeof ev.run === 'string' ? ev.run : '';
+        const r = this.insertEvent.run(ev.box, run, ev.seq, ev.session ?? null, ts, ev.type, JSON.stringify(ev), received);
         if (r.changes === 0) continue; // replay
         this.apply(ev, ts, received);
         changed.add(ev.box);
@@ -155,12 +175,12 @@ export class Store {
     return this.db.prepare('SELECT * FROM sessions WHERE box = ? AND sidechain = 0 ORDER BY COALESCE(last_activity, last, started) DESC').all(box);
   }
 
-  /** Newest `limit` events of a session, oldest first; `before` (a seq) pages backwards. */
+  /** Newest `limit` events of a session in storage order, oldest first, each with its `id`; `before` (an id) pages backwards. */
   sessionEvents(session, limit = 200, types = null, before = null) {
-    const where = (types ? ` AND type IN (${types.map(() => '?').join(',')})` : '') + (before != null ? ' AND seq < ?' : '');
+    const where = (types ? ` AND type IN (${types.map(() => '?').join(',')})` : '') + (before != null ? ' AND rowid < ?' : '');
     const params = [session, ...(types ?? []), ...(before != null ? [before] : []), limit];
-    const rows = this.db.prepare(`SELECT json FROM events WHERE session = ?${where} ORDER BY seq DESC LIMIT ?`).all(...params);
-    return rows.map((r) => JSON.parse(r.json)).reverse();
+    const rows = this.db.prepare(`SELECT rowid AS id, json FROM events WHERE session = ?${where} ORDER BY rowid DESC LIMIT ?`).all(...params);
+    return rows.map((r) => Object.assign(JSON.parse(r.json), { id: r.id })).reverse();
   }
 
   prune(now = new Date()) {

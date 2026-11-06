@@ -8,7 +8,7 @@ export async function fetchBoxes(): Promise<BoxesResponse> {
   return r.json();
 }
 
-/** Newest `limit` entries of a session, oldest first; `before` pages backwards by seq. */
+/** Newest `limit` entries of a session, oldest first; `before` pages backwards by storage id. */
 export async function fetchTimeline(session: string, limit = PAGE_SIZE, before?: number): Promise<TimelineEvent[]> {
   const q = new URLSearchParams({ limit: String(limit) });
   if (before != null) q.set('before', String(before));

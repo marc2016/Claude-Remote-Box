@@ -23,6 +23,7 @@ type Block =
   | { kind: 'prompt'; seq: number; ts: string; text: string }
   | { kind: 'reply'; seq: number; ts: string; text: string }
   | { kind: 'tools'; seq: number; items: ToolItem[] };
+// `seq` in a block is the storage id of its first event (unique per dashboard).
 
 function toBlocks(events: TimelineEvent[], waiting: boolean): Block[] {
   const blocks: Block[] = [];
@@ -37,12 +38,12 @@ function toBlocks(events: TimelineEvent[], waiting: boolean): Block[] {
   };
   for (const e of events) {
     switch (e.type) {
-      case 'prompt': blocks.push({ kind: 'prompt', seq: e.seq, ts: e.ts, text: e.text ?? '' }); break;
-      case 'reply': blocks.push({ kind: 'reply', seq: e.seq, ts: e.ts, text: e.text ?? '' }); break;
+      case 'prompt': blocks.push({ kind: 'prompt', seq: e.id, ts: e.ts, text: e.text ?? '' }); break;
+      case 'reply': blocks.push({ kind: 'reply', seq: e.id, ts: e.ts, text: e.text ?? '' }); break;
       case 'tool': {
-        const item: ToolItem = { seq: e.seq, ts: e.ts, tool: e.tool ?? 'Tool', summary: e.summary ?? '', status: 'running', callId: e.call_id };
+        const item: ToolItem = { seq: e.id, ts: e.ts, tool: e.tool ?? 'Tool', summary: e.summary ?? '', status: 'running', callId: e.call_id };
         const g = tools();
-        if (!g.seq) g.seq = e.seq;
+        if (!g.seq) g.seq = e.id;
         g.items.push(item);
         if (e.call_id) byCall.set(e.call_id, item);
         lastTool = item;
@@ -78,9 +79,9 @@ export function Conversation({ session, waiting, tick, className }: { session: s
       const page = await fetchTimeline(session, PAGE_SIZE);
       setEvents((prev) => {
         if (!prev) { setHasMore(page.length >= PAGE_SIZE); return page; }
-        const known = new Set(prev.map((e) => e.seq));
-        const fresh = page.filter((e) => !known.has(e.seq));
-        return fresh.length ? [...prev, ...fresh].sort((a, b) => a.seq - b.seq) : prev;
+        const known = new Set(prev.map((e) => e.id));
+        const fresh = page.filter((e) => !known.has(e.id));
+        return fresh.length ? [...prev, ...fresh].sort((a, b) => a.id - b.id) : prev;
       });
     } catch { setEvents((prev) => prev ?? []); }
   }, [session]);
@@ -94,7 +95,7 @@ export function Conversation({ session, waiting, tick, className }: { session: s
     const viewport = rootRef.current?.querySelector<HTMLElement>('[data-slot=message-scroller-viewport]');
     const before = viewport ? viewport.scrollHeight - viewport.scrollTop : 0;
     try {
-      const older = await fetchTimeline(session, PAGE_SIZE, events[0].seq);
+      const older = await fetchTimeline(session, PAGE_SIZE, events[0].id);
       setHasMore(older.length >= PAGE_SIZE);
       if (older.length) {
         setEvents((prev) => [...older, ...(prev ?? [])]);

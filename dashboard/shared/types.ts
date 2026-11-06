@@ -7,6 +7,7 @@ export type EventType =
 
 export interface BoxEvent {
   box: string;
+  run?: string;
   ts: string;
   seq: number;
   type: EventType | string;
@@ -112,6 +113,8 @@ export interface BoxesResponse {
 }
 
 export interface TimelineEvent {
+  /** Storage id on the dashboard: global order and paging key. */
+  id: number;
   seq: number;
   ts: string;
   type: string;
