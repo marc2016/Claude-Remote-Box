@@ -1,5 +1,5 @@
 # One file per project, listed under `include:` in compose.yaml.
-# add-project.sh writes these files; this one shows the shape.
+# `crb add` writes these files; this one shows the shape.
 # Relative paths resolve against this directory.
 services:
   my-project:

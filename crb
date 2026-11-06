@@ -1,21 +1,30 @@
 #!/usr/bin/env bash
-# Adds a project service to a claude-remote-box setup.
-# Run it in the directory that holds compose.yaml, or in an empty directory
-# to start a new setup. Usage: ./add-project.sh [git-url]
+# crb: the host-side command of claude-remote-box.
+#   ./crb add [git-url]   adds a project service (starts a new setup in an
+#                         empty directory)
+#   ./crb update          updates this script, the image, and every project
+# Run it in the directory that holds compose.yaml.
 # A new box.yaml uses the newest release (latest). Override the tag to pin a
-# release or test an unreleased build: CRB_VERSION=edge ./add-project.sh
+# release or test an unreleased build: CRB_VERSION=edge ./crb add
 #
 # Layout: compose.yaml lists services/<name>.yaml under `include:`, and each of
 # those files extends the hardened `box` service from box.yaml.
-# Needs bash 3.2+ (macOS), git, and Docker Compose 2.20+.
+# Needs bash 3.2+ (macOS), git, curl, and Docker Compose 2.20+.
 
 set -euo pipefail
 
 CRB_VERSION="${CRB_VERSION:-latest}"
 CRB_IMAGE="ghcr.io/marc2016/claude-remote-box:${CRB_VERSION}"
+# Where `update` fetches the newest copy of this script. A local path works too.
+CRB_SOURCE="${CRB_SOURCE:-https://raw.githubusercontent.com/marc2016/Claude-Remote-Box/main/crb}"
 
 die() { echo "❌ $*" >&2; exit 1; }
 warn() { echo "⚠️  $*"; }
+
+usage() {
+  echo "Usage: ./crb add [git-url]   Projekt hinzufügen"
+  echo "       ./crb update          Skript, Image und Projekte aktualisieren"
+}
 
 # ask VAR "Question" [default]: empty input takes the default.
 ask() {
@@ -68,219 +77,329 @@ yaml_str() {
   printf '"%s"' "$s"
 }
 
-echo "🧰 Claude-Remote-Box: Projekt hinzufügen"
-echo "========================================"
+# ask_permission_mode: numbered menu, sets `permission`. Enter keeps `default`.
+ask_permission_mode() {
+  local choice=""
+  echo "Permission-Modus (wie viel Claude vor Aktionen fragt):"
+  echo "  1) default      (fragt vor fast jeder Aktion auf dem Handy nach)"
+  echo "  2) acceptEdits  (Dateiänderungen ohne Rückfrage, Befehle fragen weiter)"
+  echo "  3) auto         (Claude entscheidet selbst, fragt nur bei riskanten Aktionen)"
+  while :; do
+    ask choice "Auswahl" "1"
+    case "$choice" in
+      1|default) permission=default ;;
+      2|acceptEdits) permission=acceptEdits ;;
+      3|auto) permission=auto ;;
+      *) warn "Bitte 1, 2 oder 3 eingeben."; continue ;;
+    esac
+    break
+  done
+}
 
-# --- Checks (nothing is changed before the confirmation) ---------------------
+# Phone mode: user-level memory for every session of a project. Inside the
+# container the config directory is /home/node/.claude, so the file is read
+# in /workspace and in every worktree without living in the repository.
+phone_mode_template() {
+  cat <<'EOF'
+# Phone mode
 
-if [ "$(id -u)" -eq 0 ]; then
-  die "Bitte nicht als root ausführen: Der Config-Ordner gehört sonst root, und der Container kann ihn nicht beschreiben."
-fi
-command -v git >/dev/null 2>&1 || die "git ist nicht installiert."
-command -v docker >/dev/null 2>&1 || die "docker ist nicht installiert."
-compose_ver=$(docker compose version --short 2>/dev/null) || die "Docker Compose v2 fehlt (docker compose version schlägt fehl)."
-compose_ver=${compose_ver#v}
-compose_major=${compose_ver%%.*}
-compose_minor=${compose_ver#*.}
-compose_minor=${compose_minor%%.*}
-compose_minor=${compose_minor%%[!0-9]*}
-if ! [[ "$compose_major" =~ ^[0-9]+$ && "$compose_minor" =~ ^[0-9]+$ ]]; then
-  die "Unbekannte Docker-Compose-Version: $compose_ver"
-fi
-if [ "$compose_major" -lt 2 ] || { [ "$compose_major" -eq 2 ] && [ "$compose_minor" -lt 20 ]; }; then
-  die "Docker Compose $compose_ver ist zu alt, nötig ist 2.20 oder neuer (für include:)."
-fi
+The user reads and answers on a phone. The screen is small, typing is slow,
+tapping is easy.
 
-for f in compose.yml docker-compose.yml docker-compose.yaml; do
-  if [ -f "$f" ] && [ ! -f compose.yaml ]; then
-    die "Hier liegt $f. Das Skript arbeitet mit compose.yaml; bitte umbenennen."
-  fi
-done
+## Replies
 
-include_mode=create
-existing_services=""
-if [ -f compose.yaml ]; then
-  if grep -qE '^include:[[:space:]]*$' compose.yaml; then
-    include_mode=insert
-  elif grep -qE '^include:' compose.yaml; then
-    die "compose.yaml: 'include:' muss allein in seiner Zeile stehen, mit den Einträgen als Liste darunter."
+- Keep every reply compact: a few short sentences or a short list, then stop.
+- Lead with the result or the answer. Details only when asked.
+- No wide tables, no long code blocks, no pasted command output. Summarize
+  instead; the user can ask for the full version.
+- Use headings only when a reply really has several parts.
+
+## Choices instead of typing
+
+- Whenever there is a decision or a next step to choose, end your reply with
+  the AskUserQuestion tool. Put the recommended option first, at most four.
+- Prefer questions with options over open questions.
+- When a task is finished, offer the sensible follow-ups as a choice.
+EOF
+}
+
+# write_phone_mode CONFIG_DIR: writes CLAUDE.md, never overwrites.
+write_phone_mode() {
+  if [ -f "$1/CLAUDE.md" ]; then
+    echo "   $1/CLAUDE.md ist schon vorhanden und bleibt unverändert."
   else
-    include_mode=append
+    phone_mode_template > "$1/CLAUDE.md"
+    echo "   Handy-Modus: $1/CLAUDE.md angelegt."
   fi
-  if ! existing_services=$(docker compose config --services 2>&1); then
-    echo "$existing_services" >&2
-    die "Die bestehende Compose-Konfiguration ist ungültig. Bitte erst reparieren."
-  fi
-fi
+}
 
-# --- Questions ---------------------------------------------------------------
+# service_extra_args FILE: value of CRB_EXTRA_ARGS without surrounding quotes,
+# empty when the file has none.
+service_extra_args() {
+  sed -n -E 's/^[[:space:]]+CRB_EXTRA_ARGS:[[:space:]]*(.*)$/\1/p' "$1" | head -n 1 |
+    sed -E 's/[[:space:]]+#.*$//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/'
+}
 
-# Set by ask() through printf -v.
-name="" dir="" choice="" git_name="" git_email=""
-url=${1-}
-while [ -z "$url" ]; do
-  ask url "Git-URL des Projekts"
-done
+# set_permission_flag FILE MODE: adds --permission-mode to CRB_EXTRA_ARGS in a
+# service file written by `add`, or inserts the line after CRB_NAME.
+set_permission_flag() {
+  local file=$1 mode=$2 tmp current
+  tmp=$(mktemp)
+  current=$(service_extra_args "$file")
+  if grep -qE '^[[:space:]]+CRB_EXTRA_ARGS:' "$file"; then
+    awk -v line="      CRB_EXTRA_ARGS: \"${current:+$current }--permission-mode $mode\"" \
+      '!done && /^[[:space:]]+CRB_EXTRA_ARGS:/ { print line; done = 1; next } { print }' "$file" > "$tmp"
+  else
+    awk -v line="      CRB_EXTRA_ARGS: \"--permission-mode $mode\"" \
+      '{ print } !done && /^[[:space:]]+CRB_NAME:/ { print line; done = 1 }' "$file" > "$tmp"
+  fi
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
 
-repo=${url%/}
-repo=${repo%.git}
-repo=${repo##*/}
-repo=${repo##*:}
-default_name=$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | sed 's/^[-_]*//')
+# --- Checks shared by both subcommands ---------------------------------------
 
-while :; do
-  ask name "Service-Name (auch Name in der Claude-App)" "$default_name"
-  if ! [[ "$name" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
-    warn "Erlaubt sind a-z, 0-9, - und _, am Anfang ein Buchstabe oder eine Ziffer."
-    continue
+check_host() {
+  if [ "$(id -u)" -eq 0 ]; then
+    die "Bitte nicht als root ausführen: Der Config-Ordner gehört sonst root, und der Container kann ihn nicht beschreiben."
   fi
-  if [ -e "services/$name.yaml" ] || printf '%s\n' "$existing_services" | grep -qxF "$name"; then
-    warn "Der Name '$name' ist schon vergeben."
-    continue
+  command -v git >/dev/null 2>&1 || die "git ist nicht installiert."
+  command -v docker >/dev/null 2>&1 || die "docker ist nicht installiert."
+  local compose_ver compose_major compose_minor
+  compose_ver=$(docker compose version --short 2>/dev/null) || die "Docker Compose v2 fehlt (docker compose version schlägt fehl)."
+  compose_ver=${compose_ver#v}
+  compose_major=${compose_ver%%.*}
+  compose_minor=${compose_ver#*.}
+  compose_minor=${compose_minor%%.*}
+  compose_minor=${compose_minor%%[!0-9]*}
+  if ! [[ "$compose_major" =~ ^[0-9]+$ && "$compose_minor" =~ ^[0-9]+$ ]]; then
+    die "Unbekannte Docker-Compose-Version: $compose_ver"
   fi
-  break
-done
-
-while :; do
-  reuse_dir=0 clear_empty=0
-  # The default keeps the checkout next to its config: ./<name>/workspace.
-  ask dir "Zielordner für das Repository" "./$name/workspace"
-  dir=${dir/#\~/$HOME}
-  if [ "$dir" = . ]; then dir=$PWD; fi
-  while [[ "$dir" == ./* ]]; do dir=${dir#./}; done
-  case "$dir" in /*) ;; *) dir="$PWD/$dir" ;; esac
-  dir=${dir%/}
-  # The config holds the login token: it must not be visible in /workspace.
-  cfg="$PWD/$name/config"
-  if [ "$dir" = "$cfg" ] || [[ "$dir" == "$cfg/"* || "$cfg" == "$dir/"* ]]; then
-    warn "Projektordner und Config-Ordner ($cfg) dürfen nicht ineinander liegen (Login-Token)."
-    continue
+  if [ "$compose_major" -lt 2 ] || { [ "$compose_major" -eq 2 ] && [ "$compose_minor" -lt 20 ]; }; then
+    die "Docker Compose $compose_ver ist zu alt, nötig ist 2.20 oder neuer (für include:)."
   fi
-  if [[ "$dir" == *:* ]]; then
-    warn "Der Pfad darf keinen Doppelpunkt enthalten."
-    continue
-  fi
-  if [ -e "$dir" ]; then
-    if [ ! -d "$dir" ]; then
-      warn "$dir existiert und ist kein Ordner."
-      continue
+  local f
+  for f in compose.yml docker-compose.yml docker-compose.yaml; do
+    if [ -f "$f" ] && [ ! -f compose.yaml ]; then
+      die "Hier liegt $f. Das Skript arbeitet mit compose.yaml; bitte umbenennen."
     fi
-    if [ -r "$dir" ] && [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
-      if [ -w "$dir" ]; then
-        echo "   $dir ist leer, das Repository wird hineingeklont."
-      else
-        # Typically created as root by Docker for a bind mount whose source
-        # was missing. An empty directory can be removed with write access to
-        # its parent alone.
-        owner=$(ls -ld "$dir" | awk '{print $3}')
-        echo "   $dir ist leer, gehört aber $owner (vermutlich von Docker angelegt)."
-        echo "   Er wird vor dem Klonen entfernt."
-        clear_empty=1
-      fi
-    elif same_repo "$dir" "$url"; then
-      echo "   $dir enthält dieses Repository schon und wird ohne Klonen verwendet."
-      reuse_dir=1
-    elif confirm "$dir existiert schon. Ohne Klonen als Projektordner verwenden?"; then
-      reuse_dir=1
+  done
+}
+
+# =============================================================================
+# add
+# =============================================================================
+
+cmd_add() {
+  echo "🧰 Claude-Remote-Box: Projekt hinzufügen"
+  echo "========================================"
+
+  # --- Checks (nothing is changed before the confirmation) -------------------
+
+  check_host
+
+  include_mode=create
+  existing_services=""
+  if [ -f compose.yaml ]; then
+    if grep -qE '^include:[[:space:]]*$' compose.yaml; then
+      include_mode=insert
+    elif grep -qE '^include:' compose.yaml; then
+      die "compose.yaml: 'include:' muss allein in seiner Zeile stehen, mit den Einträgen als Liste darunter."
     else
-      continue
+      include_mode=append
+    fi
+    if ! existing_services=$(docker compose config --services 2>&1); then
+      echo "$existing_services" >&2
+      die "Die bestehende Compose-Konfiguration ist ungültig. Bitte erst reparieren."
     fi
   fi
-  break
-done
 
-echo ""
-echo "Spawn-Modus:"
-echo "  1) worktree  (jede Session bekommt einen eigenen Git-Worktree, empfohlen)"
-echo "  2) same-dir  (alle Sessions teilen /workspace)"
-while :; do
-  ask choice "Auswahl" "1"
-  case "$choice" in
-    1|worktree) spawn=worktree ;;
-    2|same-dir) spawn=same-dir ;;
-    *) warn "Bitte 1 oder 2 eingeben."; continue ;;
-  esac
-  break
-done
+  # --- Questions -------------------------------------------------------------
 
-echo ""
-browsers=0
-if confirm_yes "Browser-Cache für Screenshots anlegen?"; then browsers=1; fi
+  # Set by ask() through printf -v.
+  name="" dir="" choice="" git_name="" git_email="" permission=default
+  url=${1-}
+  while [ -z "$url" ]; do
+    ask url "Git-URL des Projekts"
+  done
 
-git_name_default=$(git config --global user.name 2>/dev/null || true)
-git_email_default=$(git config --global user.email 2>/dev/null || true)
-ask git_name "Git-Name für Commits von Claude (leer = keiner)" "$git_name_default"
-ask git_email "Git-E-Mail für Commits von Claude (leer = keine)" "$git_email_default"
+  repo=${url%/}
+  repo=${repo%.git}
+  repo=${repo##*/}
+  repo=${repo##*:}
+  default_name=$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | sed 's/^[-_]*//')
 
-config_dir="$name/config"
-if [ -d "$config_dir" ] && [ -n "$(ls -A "$config_dir" 2>/dev/null)" ]; then
-  if ! confirm "$config_dir existiert und ist nicht leer (vorhandener Login?). Weiterverwenden?"; then
+  while :; do
+    ask name "Service-Name (auch Name in der Claude-App)" "$default_name"
+    if ! [[ "$name" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+      warn "Erlaubt sind a-z, 0-9, - und _, am Anfang ein Buchstabe oder eine Ziffer."
+      continue
+    fi
+    if [ -e "services/$name.yaml" ] || printf '%s\n' "$existing_services" | grep -qxF "$name"; then
+      warn "Der Name '$name' ist schon vergeben."
+      continue
+    fi
+    break
+  done
+
+  while :; do
+    reuse_dir=0 clear_empty=0
+    # The default keeps the checkout next to its config: ./<name>/workspace.
+    ask dir "Zielordner für das Repository" "./$name/workspace"
+    dir=${dir/#\~/$HOME}
+    if [ "$dir" = . ]; then dir=$PWD; fi
+    while [[ "$dir" == ./* ]]; do dir=${dir#./}; done
+    case "$dir" in /*) ;; *) dir="$PWD/$dir" ;; esac
+    dir=${dir%/}
+    # The config holds the login token: it must not be visible in /workspace.
+    cfg="$PWD/$name/config"
+    if [ "$dir" = "$cfg" ] || [[ "$dir" == "$cfg/"* || "$cfg" == "$dir/"* ]]; then
+      warn "Projektordner und Config-Ordner ($cfg) dürfen nicht ineinander liegen (Login-Token)."
+      continue
+    fi
+    if [[ "$dir" == *:* ]]; then
+      warn "Der Pfad darf keinen Doppelpunkt enthalten."
+      continue
+    fi
+    if [ -e "$dir" ]; then
+      if [ ! -d "$dir" ]; then
+        warn "$dir existiert und ist kein Ordner."
+        continue
+      fi
+      if [ -r "$dir" ] && [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+        if [ -w "$dir" ]; then
+          echo "   $dir ist leer, das Repository wird hineingeklont."
+        else
+          # Typically created as root by Docker for a bind mount whose source
+          # was missing. An empty directory can be removed with write access to
+          # its parent alone.
+          owner=$(ls -ld "$dir" | awk '{print $3}')
+          echo "   $dir ist leer, gehört aber $owner (vermutlich von Docker angelegt)."
+          echo "   Er wird vor dem Klonen entfernt."
+          clear_empty=1
+        fi
+      elif same_repo "$dir" "$url"; then
+        echo "   $dir enthält dieses Repository schon und wird ohne Klonen verwendet."
+        reuse_dir=1
+      elif confirm "$dir existiert schon. Ohne Klonen als Projektordner verwenden?"; then
+        reuse_dir=1
+      else
+        continue
+      fi
+    fi
+    break
+  done
+
+  echo ""
+  echo "Spawn-Modus:"
+  echo "  1) worktree  (jede Session bekommt einen eigenen Git-Worktree, empfohlen)"
+  echo "  2) same-dir  (alle Sessions teilen /workspace)"
+  while :; do
+    ask choice "Auswahl" "1"
+    case "$choice" in
+      1|worktree) spawn=worktree ;;
+      2|same-dir) spawn=same-dir ;;
+      *) warn "Bitte 1 oder 2 eingeben."; continue ;;
+    esac
+    break
+  done
+
+  echo ""
+  ask_permission_mode
+
+  echo ""
+  phone=0
+  if confirm_yes "Handy-Modus (kurze Antworten, Auswahllisten statt Tippen)?"; then phone=1; fi
+
+  echo ""
+  browsers=0
+  if confirm_yes "Browser-Cache für Screenshots anlegen?"; then browsers=1; fi
+
+  git_name_default=$(git config --global user.name 2>/dev/null || true)
+  git_email_default=$(git config --global user.email 2>/dev/null || true)
+  ask git_name "Git-Name für Commits von Claude (leer = keiner)" "$git_name_default"
+  ask git_email "Git-E-Mail für Commits von Claude (leer = keine)" "$git_email_default"
+
+  config_dir="$name/config"
+  if [ -d "$config_dir" ] && [ -n "$(ls -A "$config_dir" 2>/dev/null)" ]; then
+    if ! confirm "$config_dir existiert und ist nicht leer (vorhandener Login?). Weiterverwenden?"; then
+      echo "Abgebrochen, nichts geändert."
+      exit 1
+    fi
+  fi
+
+  # --- Summary ---------------------------------------------------------------
+
+  service_file="services/$name.yaml"
+  echo ""
+  echo "📋 Zusammenfassung"
+  echo "  Service:      $name"
+  if [ "$reuse_dir" -eq 1 ]; then
+    echo "  Projekt:      $dir (vorhanden, wird nicht geklont)"
+  else
+    echo "  Projekt:      $dir  <- $url"
+  fi
+  echo "  Spawn-Modus:  $spawn"
+  echo "  Permission:   $permission"
+  if [ "$phone" -eq 1 ]; then
+    if [ -f "$config_dir/CLAUDE.md" ]; then
+      echo "  Handy-Modus:  an (./$config_dir/CLAUDE.md vorhanden, bleibt)"
+    else
+      echo "  Handy-Modus:  an (./$config_dir/CLAUDE.md)"
+    fi
+  else
+    echo "  Handy-Modus:  aus"
+  fi
+  echo "  Git:          ${git_name:-<keiner>} <${git_email:-keine}>"
+  echo "  Config:       ./$config_dir (chmod 700)"
+  if [ "$browsers" -eq 1 ]; then echo "  Browser:      Volume $name-browsers"; fi
+  echo "  Compose:      $service_file, eingetragen in compose.yaml"
+  if [ ! -f compose.yaml ]; then echo "  Neu:          compose.yaml"; fi
+  if [ ! -f box.yaml ]; then echo "  Neu:          box.yaml (Image $CRB_IMAGE)"; fi
+  if [ ! -f .env ] && [ "$include_mode" = create ]; then
+    echo "  Neu:          .env (UID=$(id -u), GID=$(id -g))"
+  fi
+  echo ""
+  if ! confirm "Anlegen?"; then
     echo "Abgebrochen, nichts geändert."
-    exit 1
+    exit 0
   fi
-fi
 
-# --- Summary -----------------------------------------------------------------
+  # --- Changes ---------------------------------------------------------------
 
-service_file="services/$name.yaml"
-echo ""
-echo "📋 Zusammenfassung"
-echo "  Service:      $name"
-if [ "$reuse_dir" -eq 1 ]; then
-  echo "  Projekt:      $dir (vorhanden, wird nicht geklont)"
-else
-  echo "  Projekt:      $dir  <- $url"
-fi
-echo "  Spawn-Modus:  $spawn"
-echo "  Git:          ${git_name:-<keiner>} <${git_email:-keine}>"
-echo "  Config:       ./$config_dir (chmod 700)"
-if [ "$browsers" -eq 1 ]; then echo "  Browser:      Volume $name-browsers"; fi
-echo "  Compose:      $service_file, eingetragen in compose.yaml"
-if [ ! -f compose.yaml ]; then echo "  Neu:          compose.yaml"; fi
-if [ ! -f box.yaml ]; then echo "  Neu:          box.yaml (Image $CRB_IMAGE)"; fi
-if [ ! -f .env ] && [ "$include_mode" = create ]; then
-  echo "  Neu:          .env (UID=$(id -u), GID=$(id -g))"
-fi
-echo ""
-if ! confirm "Anlegen?"; then
-  echo "Abgebrochen, nichts geändert."
-  exit 0
-fi
-
-# --- Changes -----------------------------------------------------------------
-
-echo ""
-if [ "$reuse_dir" -eq 1 ]; then
-  echo "📥 1/4 Verwende vorhandenen Ordner $dir"
-else
-  echo "📥 1/4 Klone Repository..."
-  mkdir -p "$(dirname "$dir")"
-  if [ "$clear_empty" -eq 1 ] && ! rmdir "$dir"; then
-    die "$dir lässt sich nicht entfernen. Stoppe den Container, der ihn mountet, und entferne ihn: sudo rmdir $dir"
+  echo ""
+  if [ "$reuse_dir" -eq 1 ]; then
+    echo "📥 1/4 Verwende vorhandenen Ordner $dir"
+  else
+    echo "📥 1/4 Klone Repository..."
+    mkdir -p "$(dirname "$dir")"
+    if [ "$clear_empty" -eq 1 ] && ! rmdir "$dir"; then
+      die "$dir lässt sich nicht entfernen. Stoppe den Container, der ihn mountet, und entferne ihn: sudo rmdir $dir"
+    fi
+    git clone "$url" "$dir" || die "Klonen fehlgeschlagen. Es wurde nichts weiter angelegt."
   fi
-  git clone "$url" "$dir" || die "Klonen fehlgeschlagen. Es wurde nichts weiter angelegt."
-fi
 
-echo ""
-echo "📁 2/4 Lege Config-Ordner an..."
-# An empty config directory created as root by Docker is replaced.
-if [ -d "$config_dir" ] && [ ! -w "$config_dir" ] && [ -r "$config_dir" ] && [ -z "$(ls -A "$config_dir")" ]; then
-  rmdir "$config_dir" || die "$config_dir gehört nicht dir. Stoppe den Container und korrigiere es: sudo rm -r $PWD/$config_dir"
-fi
-mkdir -p "$config_dir"
-chmod 700 "$config_dir" || die "$config_dir gehört nicht dir: sudo chown -R $(id -u):$(id -g) $PWD/$config_dir"
+  echo ""
+  echo "📁 2/4 Lege Config-Ordner an..."
+  # An empty config directory created as root by Docker is replaced.
+  if [ -d "$config_dir" ] && [ ! -w "$config_dir" ] && [ -r "$config_dir" ] && [ -z "$(ls -A "$config_dir")" ]; then
+    rmdir "$config_dir" || die "$config_dir gehört nicht dir. Stoppe den Container und korrigiere es: sudo rm -r $PWD/$config_dir"
+  fi
+  mkdir -p "$config_dir"
+  chmod 700 "$config_dir" || die "$config_dir gehört nicht dir: sudo chown -R $(id -u):$(id -g) $PWD/$config_dir"
+  if [ "$phone" -eq 1 ]; then write_phone_mode "$config_dir"; fi
 
-echo ""
-echo "✍️  3/4 Trage Service ein..."
-# Only a fresh setup gets a .env: in an existing one it would silently change
-# the user of the services that are already running.
-if [ ! -f .env ] && [ "$include_mode" = create ]; then
-  printf 'UID=%s\nGID=%s\n' "$(id -u)" "$(id -g)" > .env
-elif [ ! -f .env ]; then
-  warn "Keine .env vorhanden: Alle Services laufen als UID/GID 1000. Für deinen Benutzer: printf 'UID=%s\\nGID=%s\\n' \"\$(id -u)\" \"\$(id -g)\" > .env"
-fi
-if [ ! -f box.yaml ]; then
-  cat > box.yaml <<EOF
+  echo ""
+  echo "✍️  3/4 Trage Service ein..."
+  # Only a fresh setup gets a .env: in an existing one it would silently change
+  # the user of the services that are already running.
+  if [ ! -f .env ] && [ "$include_mode" = create ]; then
+    printf 'UID=%s\nGID=%s\n' "$(id -u)" "$(id -g)" > .env
+  elif [ ! -f .env ]; then
+    warn "Keine .env vorhanden: Alle Services laufen als UID/GID 1000. Für deinen Benutzer: printf 'UID=%s\\nGID=%s\\n' \"\$(id -u)\" \"\$(id -g)\" > .env"
+  fi
+  if [ ! -f box.yaml ]; then
+    cat > box.yaml <<EOF
 # Shared base for all project services. Not started itself: each file in
 # services/ extends the \`box\` service from here.
 services:
@@ -294,82 +413,316 @@ services:
       core: 0                     # no core dumps in /workspace
     # No ports and no Docker socket: Remote Control only needs outbound HTTPS.
 EOF
-fi
+  fi
 
-mkdir -p services
-{
-  echo "# Created by add-project.sh. Relative paths resolve against this directory."
-  echo "services:"
-  echo "  $name:"
-  echo "    extends:"
-  echo "      file: ../box.yaml"
-  echo "      service: box"
-  echo "    environment:"
-  echo "      CRB_NAME: \"$name\""
-  if [ "$spawn" = same-dir ]; then echo "      CRB_SPAWN: \"same-dir\""; fi
-  if [ -n "$git_name" ]; then
-    echo "      GIT_AUTHOR_NAME: $(yaml_str "$git_name")"
-    echo "      GIT_COMMITTER_NAME: $(yaml_str "$git_name")"
-  fi
-  if [ -n "$git_email" ]; then
-    echo "      GIT_AUTHOR_EMAIL: $(yaml_str "$git_email")"
-    echo "      GIT_COMMITTER_EMAIL: $(yaml_str "$git_email")"
-  fi
-  echo "    volumes:"
-  # Paths inside this directory stay relative, so the setup can be moved.
-  if [[ "$dir" == "$PWD/"* ]]; then
-    echo "      - $(yaml_str "../${dir#"$PWD"/}:/workspace")"
-  else
-    echo "      - $(yaml_str "$dir:/workspace")"
-  fi
-  echo "      - \"../$name/config:/home/node/.claude\"   # login token"
-  if [ "$browsers" -eq 1 ]; then
-    echo "      - \"$name-browsers:/home/node/.cache/ms-playwright\""
-    echo ""
-    echo "volumes:"
-    echo "  $name-browsers: {}"
-  fi
-} > "$service_file"
+  mkdir -p services
+  {
+    echo "# Created by crb. Relative paths resolve against this directory."
+    echo "services:"
+    echo "  $name:"
+    echo "    extends:"
+    echo "      file: ../box.yaml"
+    echo "      service: box"
+    echo "    environment:"
+    echo "      CRB_NAME: \"$name\""
+    if [ "$spawn" = same-dir ]; then echo "      CRB_SPAWN: \"same-dir\""; fi
+    if [ "$permission" != default ]; then echo "      CRB_EXTRA_ARGS: \"--permission-mode $permission\""; fi
+    if [ -n "$git_name" ]; then
+      echo "      GIT_AUTHOR_NAME: $(yaml_str "$git_name")"
+      echo "      GIT_COMMITTER_NAME: $(yaml_str "$git_name")"
+    fi
+    if [ -n "$git_email" ]; then
+      echo "      GIT_AUTHOR_EMAIL: $(yaml_str "$git_email")"
+      echo "      GIT_COMMITTER_EMAIL: $(yaml_str "$git_email")"
+    fi
+    echo "    volumes:"
+    # Paths inside this directory stay relative, so the setup can be moved.
+    if [[ "$dir" == "$PWD/"* ]]; then
+      echo "      - $(yaml_str "../${dir#"$PWD"/}:/workspace")"
+    else
+      echo "      - $(yaml_str "$dir:/workspace")"
+    fi
+    echo "      - \"../$name/config:/home/node/.claude\"   # login token"
+    if [ "$browsers" -eq 1 ]; then
+      echo "      - \"$name-browsers:/home/node/.cache/ms-playwright\""
+      echo ""
+      echo "volumes:"
+      echo "  $name-browsers: {}"
+    fi
+  } > "$service_file"
 
-# Keep the original compose.yaml to restore it exactly if the check fails.
-compose_backup=""
-if [ -f compose.yaml ]; then
-  compose_backup=$(mktemp)
-  cat compose.yaml > "$compose_backup"
-fi
-entry="  - $service_file"
-case "$include_mode" in
-  create)
-    printf 'include:\n%s\n' "$entry" > compose.yaml
-    ;;
-  insert)
-    tmp=$(mktemp)
-    awk -v line="$entry" '{ print } !done && /^include:[[:space:]]*$/ { print line; done = 1 }' compose.yaml > "$tmp"
-    cat "$tmp" > compose.yaml
-    rm -f "$tmp"
-    ;;
-  append)
-    if [ -n "$(tail -c 1 compose.yaml)" ]; then echo >> compose.yaml; fi
-    printf '\ninclude:\n%s\n' "$entry" >> compose.yaml
-    ;;
-esac
+  # Keep the original compose.yaml to restore it exactly if the check fails.
+  compose_backup=""
+  if [ -f compose.yaml ]; then
+    compose_backup=$(mktemp)
+    cat compose.yaml > "$compose_backup"
+  fi
+  entry="  - $service_file"
+  case "$include_mode" in
+    create)
+      printf 'include:\n%s\n' "$entry" > compose.yaml
+      ;;
+    insert)
+      tmp=$(mktemp)
+      awk -v line="$entry" '{ print } !done && /^include:[[:space:]]*$/ { print line; done = 1 }' compose.yaml > "$tmp"
+      cat "$tmp" > compose.yaml
+      rm -f "$tmp"
+      ;;
+    append)
+      if [ -n "$(tail -c 1 compose.yaml)" ]; then echo >> compose.yaml; fi
+      printf '\ninclude:\n%s\n' "$entry" >> compose.yaml
+      ;;
+  esac
 
-echo ""
-echo "🔍 4/4 Prüfe mit docker compose config..."
-if ! check=$(docker compose config -q 2>&1); then
-  echo "$check" >&2
-  rm -f "$service_file"
-  if [ -n "$compose_backup" ]; then
-    cat "$compose_backup" > compose.yaml
-  else
-    rm -f compose.yaml
+  echo ""
+  echo "🔍 4/4 Prüfe mit docker compose config..."
+  if ! check=$(docker compose config -q 2>&1); then
+    echo "$check" >&2
+    rm -f "$service_file"
+    if [ -n "$compose_backup" ]; then
+      cat "$compose_backup" > compose.yaml
+    else
+      rm -f compose.yaml
+    fi
+    rm -f "$compose_backup"
+    die "Die Compose-Konfiguration ist ungültig. $service_file und der Eintrag in compose.yaml wurden entfernt; Projektordner und ./$config_dir bleiben."
   fi
   rm -f "$compose_backup"
-  die "Die Compose-Konfiguration ist ungültig. $service_file und der Eintrag in compose.yaml wurden entfernt; Projektordner und ./$config_dir bleiben."
-fi
-rm -f "$compose_backup"
 
-echo ""
-echo "✨ $name ist angelegt. Weiter mit:"
-echo "   docker compose up -d $name"
-echo "   docker compose exec -it $name setup"
+  echo ""
+  echo "✨ $name ist angelegt. Weiter mit:"
+  echo "   docker compose up -d $name"
+  echo "   docker compose exec -it $name setup"
+}
+
+# =============================================================================
+# update
+# =============================================================================
+
+# self_update: fetches CRB_SOURCE and, when it differs from this file, replaces
+# it and re-runs `update` once with the new version.
+self_update() {
+  local self tmp url mode
+  self=$0
+  tmp=$(mktemp)
+  url=$CRB_SOURCE
+  case "$url" in
+    http://*|https://*)
+      # The query string is meant to bypass the CDN cache of raw.githubusercontent.
+      url="$url?t=$(date +%s)"
+      if ! curl -fsSL "$url" -o "$tmp" 2>/dev/null; then
+        warn "Neue Version konnte nicht geladen werden ($CRB_SOURCE). Weiter mit der vorhandenen."
+        rm -f "$tmp"; return 0
+      fi ;;
+    *)
+      url=${url#file://}
+      if ! cp "$url" "$tmp" 2>/dev/null; then
+        warn "Neue Version konnte nicht geladen werden ($CRB_SOURCE). Weiter mit der vorhandenen."
+        rm -f "$tmp"; return 0
+      fi ;;
+  esac
+  if [ ! -s "$tmp" ] || [ "$(head -n 1 "$tmp")" != "#!/usr/bin/env bash" ] || ! bash -n "$tmp" 2>/dev/null; then
+    warn "Die geladene Datei sieht nicht wie crb aus. Weiter mit der vorhandenen Version."
+    rm -f "$tmp"; return 0
+  fi
+  if cmp -s "$tmp" "$self"; then
+    echo "   Skript ist aktuell."
+    rm -f "$tmp"; return 0
+  fi
+  mode=$(stat -c %a "$self" 2>/dev/null || stat -f %Lp "$self")
+  cp -p "$self" "$self.old"
+  cat "$tmp" > "$self"
+  chmod "$mode" "$self"
+  rm -f "$tmp"
+  echo "   Skript aktualisiert, starte neu mit der neuen Version."
+  echo ""
+  exec "$self" update --no-self-update
+}
+
+cmd_update() {
+  local do_self_update=1
+  if [ "${1-}" = "--no-self-update" ]; then do_self_update=0; fi
+
+  echo "🧰 Claude-Remote-Box: Installation aktualisieren"
+  echo "================================================"
+
+  check_host
+  [ -f compose.yaml ] || die "Hier liegt keine compose.yaml. Bitte im Ordner der Installation ausführen."
+
+  echo ""
+  echo "🔄 1/4 Skript..."
+  if [ "$do_self_update" -eq 1 ]; then
+    self_update
+  else
+    rm -f "$0.old"
+    echo "   Läuft mit der neuen Version."
+  fi
+
+  # --- Collect (nothing is changed before the confirmation) ------------------
+
+  echo ""
+  echo "🔍 2/4 Prüfe Installation..."
+  local layout=services
+  if [ ! -f box.yaml ] || [ ! -d services ]; then layout=single; fi
+
+  local plan_tag=0 tag=""
+  if [ "$layout" = services ]; then
+    tag=$(sed -n -E 's#^[[:space:]]+image:[[:space:]]*ghcr\.io/marc2016/claude-remote-box:([^[:space:]]+).*#\1#p' box.yaml | head -n 1)
+    if [ -n "$tag" ] && [ "$tag" != latest ]; then
+      echo "   box.yaml verwendet das Image mit Tag '$tag'."
+      if confirm_yes "   Auf 'latest' umstellen (immer das neueste Release)?"; then plan_tag=1; fi
+    else
+      echo "   Image: latest"
+    fi
+  fi
+
+  # Parallel arrays (bash 3.2 has no associative arrays).
+  local -a names=() modes=() phones=()
+  local f n permission current extra has_file
+  if [ "$layout" = services ]; then
+    for f in services/*.yaml; do
+      [ -f "$f" ] || continue
+      n=$(basename "$f" .yaml)
+      if ! grep -qF -- "../$n/config:/home/node/.claude" "$f"; then
+        echo "   $n: nicht von crb angelegt, wird übersprungen."
+        continue
+      fi
+      extra=$(service_extra_args "$f")
+      current=$(printf '%s' "$extra" | sed -n -E 's/.*--permission-mode[= ]([^[:space:]]+).*/\1/p')
+      has_file=0; [ -f "$n/config/CLAUDE.md" ] && has_file=1
+      echo ""
+      echo "   Projekt $n"
+      permission=""
+      if [ -n "$current" ]; then
+        echo "   Permission:   $current (bleibt)"
+      else
+        ask_permission_mode
+        [ "$permission" = default ] && permission=""
+      fi
+      local want_phone=0
+      if [ "$has_file" -eq 1 ]; then
+        echo "   Handy-Modus:  an (bleibt)"
+      elif confirm_yes "   Handy-Modus anlegen (kurze Antworten, Auswahllisten statt Tippen)?"; then
+        want_phone=1
+      fi
+      names+=("$n"); modes+=("$permission"); phones+=("$want_phone")
+    done
+  else
+    echo "   Einzeldatei-Setup (Services in compose.yaml): Dateien werden nicht bearbeitet."
+    echo "   Pro Service nach Bedarf von Hand eintragen:"
+    local svc
+    for svc in $(docker compose config --services 2>/dev/null); do
+      echo "     $svc:"
+      echo "       environment: CRB_EXTRA_ARGS: \"--permission-mode auto\"   (oder acceptEdits)"
+      echo "       Handy-Modus: Vorlage aus crb (phone_mode_template) nach ./$svc/config/CLAUDE.md"
+    done
+    echo "   Image-Tag: in compose.yaml auf claude-remote-box:latest stellen."
+  fi
+
+  # --- Summary ---------------------------------------------------------------
+
+  local -a changed_files=() changed_services=()
+  local i
+  echo ""
+  echo "📋 Geplante Änderungen"
+  if [ "$plan_tag" -eq 1 ]; then
+    echo "  box.yaml:  Image-Tag $tag -> latest"
+    changed_files+=(box.yaml)
+  fi
+  for i in "${!names[@]}"; do
+    n=${names[$i]}
+    if [ -n "${modes[$i]}" ]; then
+      echo "  services/$n.yaml:  CRB_EXTRA_ARGS --permission-mode ${modes[$i]}"
+      changed_files+=("services/$n.yaml"); changed_services+=("$n")
+    fi
+    if [ "${phones[$i]}" -eq 1 ]; then
+      echo "  $n/config/CLAUDE.md:  Handy-Modus anlegen"
+    fi
+  done
+  local nothing=1
+  if [ "${#changed_files[@]}" -gt 0 ]; then nothing=0; fi
+  for i in "${!names[@]}"; do [ "${phones[$i]}" -eq 1 ] && nothing=0; done
+  if [ "$nothing" -eq 1 ]; then
+    echo "  keine, die Installation ist aktuell."
+  else
+    echo ""
+    if ! confirm "Anwenden?"; then
+      echo "Abgebrochen, nichts geändert."
+      exit 0
+    fi
+  fi
+
+  # --- Write, validate, restore ----------------------------------------------
+
+  if [ "$nothing" -eq 0 ]; then
+    echo ""
+    echo "✍️  3/4 Schreibe Änderungen..."
+    local backup
+    backup=$(mktemp -d)
+    for f in "${changed_files[@]+"${changed_files[@]}"}"; do
+      mkdir -p "$backup/$(dirname "$f")"
+      cp -p "$f" "$backup/$f"
+    done
+    if [ "$plan_tag" -eq 1 ]; then
+      sed -i.crbtmp -E "s#(ghcr\.io/marc2016/claude-remote-box:)$tag#\1latest#" box.yaml
+      rm -f box.yaml.crbtmp
+      echo "   box.yaml: Image-Tag -> latest"
+    fi
+    for i in "${!names[@]}"; do
+      n=${names[$i]}
+      if [ -n "${modes[$i]}" ]; then
+        set_permission_flag "services/$n.yaml" "${modes[$i]}"
+        echo "   services/$n.yaml: --permission-mode ${modes[$i]}"
+      fi
+      if [ "${phones[$i]}" -eq 1 ]; then
+        mkdir -p "$n/config"
+        write_phone_mode "$n/config"
+      fi
+    done
+    local check
+    if ! check=$(docker compose config -q 2>&1); then
+      echo "$check" >&2
+      for f in "${changed_files[@]+"${changed_files[@]}"}"; do cp -p "$backup/$f" "$f"; done
+      rm -rf "$backup"
+      die "Die Compose-Konfiguration ist ungültig. Die geänderten Dateien wurden wiederhergestellt; angelegte CLAUDE.md bleiben."
+    fi
+    rm -rf "$backup"
+  else
+    echo ""
+    echo "✍️  3/4 Nichts zu schreiben."
+  fi
+
+  # --- Pull and recreate -----------------------------------------------------
+
+  echo ""
+  echo "📦 4/4 Hole das neueste Image..."
+  docker compose pull || die "docker compose pull ist fehlgeschlagen."
+
+  if [ "${#changed_services[@]}" -gt 0 ]; then
+    echo ""
+    echo "Geänderte Umgebungsvariablen wirken erst nach dem Neustart der Services:"
+    echo "   ${changed_services[*]}"
+    if confirm "Jetzt neu starten? Laufende Sessions dieser Services werden beendet."; then
+      docker compose up -d "${changed_services[@]}"
+    else
+      echo "   Später: docker compose up -d ${changed_services[*]}"
+    fi
+  fi
+
+  echo ""
+  echo "✨ Fertig."
+}
+
+# =============================================================================
+
+main() {
+  local cmd=${1-}
+  if [ $# -gt 0 ]; then shift; fi
+  case "$cmd" in
+    add) cmd_add "$@" ;;
+    update) cmd_update "$@" ;;
+    *) usage >&2; exit 64 ;;
+  esac
+}
+
+main "$@"

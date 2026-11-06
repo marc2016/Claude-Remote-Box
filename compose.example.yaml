@@ -1,4 +1,4 @@
-# Single-file setup. Easier: add-project.sh creates compose.yaml, box.yaml and
+# Single-file setup. Easier: `crb add` creates compose.yaml, box.yaml and
 # one file per project in services/ for you (see README, "Quick start").
 # Copy to compose.yaml and add one service per project.
 # Each project gets its own container, Remote Control environment and config directory.
@@ -8,7 +8,7 @@
 #   docker compose up -d my-project && docker compose exec -it my-project setup
 
 x-box: &box
-  image: ghcr.io/marc2016/claude-remote-box:0.2.0
+  image: ghcr.io/marc2016/claude-remote-box:0.3.0
   restart: unless-stopped
   user: "${UID:-1000}:${GID:-1000}"
   cap_drop: [ALL]
@@ -23,7 +23,7 @@ services:
     environment:
       CRB_NAME: my-project        # environment name in the Claude app
       # CRB_SPAWN: worktree       # default: worktree for Git projects, else same-dir
-      # CRB_EXTRA_ARGS: --permission-mode auto   # fewer prompts; default asks before most actions
+      # CRB_EXTRA_ARGS: --permission-mode auto   # crb add asks for this; default asks before most actions
       # GIT_AUTHOR_NAME: Your Name
       # GIT_AUTHOR_EMAIL: you@example.com
       # GIT_COMMITTER_NAME: Your Name

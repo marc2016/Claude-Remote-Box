@@ -8,7 +8,8 @@ Run [Claude Code](https://code.claude.com) on your own headless machine in a sma
 
 - **A lean Compose service.** One prebuilt image, plus one service per project. No SSH, no tmux, no open ports, no Docker socket.
 - **Controlled from the phone.** Each project shows up as its own environment in the Claude app under **Code**.
-- **Real permission prompts.** Claude runs in the normal permission mode, not with `--dangerously-skip-permissions`. Before it runs a command, it asks on your phone and waits for your answer.
+- **You choose how much Claude asks.** When you add a project you pick the permission mode: `default` asks on your phone before most actions, `acceptEdits` lets file edits through, `auto` lets Claude decide and asks only for risky actions. Prompts, when they happen, appear on your phone and block until you answer.
+- **Made for a phone.** An optional phone mode tells Claude to keep replies short and to offer the next steps as tappable choices instead of asking you to type.
 - **Hardened by default.** The container runs as non-root, with `cap_drop: ALL` and `no-new-privileges`, and sees only the one project directory you mount.
 
 ```text
@@ -28,19 +29,19 @@ Run [Claude Code](https://code.claude.com) on your own headless machine in a sma
 ## Requirements
 
 - A Claude subscription that includes Remote Control (Pro, Max, Ultra, Team, or Enterprise). **API keys and `claude setup-token` tokens do not work** for Remote Control.
-- Docker with Compose v2. The `add-project.sh` script needs Compose 2.20 or newer, bash, and git on the host.
+- Docker with Compose v2. The `crb` script needs Compose 2.20 or newer, bash, git, and curl on the host.
 - Recommended: each project is a Git repository. Then every session started from the app gets its own git worktree. Other directories work too, with all sessions sharing `/workspace`.
 
 ## Quick start
 
 ```sh
 mkdir claude-remote-box && cd claude-remote-box
-curl -fsSLO https://raw.githubusercontent.com/marc2016/Claude-Remote-Box/main/add-project.sh
-chmod +x add-project.sh
-./add-project.sh git@github.com:you/my-project.git
+curl -fsSLO https://raw.githubusercontent.com/marc2016/Claude-Remote-Box/main/crb
+chmod +x crb
+./crb add git@github.com:you/my-project.git
 ```
 
-The script asks for the service name (also the name in the Claude app), where to clone the repository (default `./<name>/workspace`, next to its config), the spawn mode, an optional browser cache, and the Git identity for Claude's commits. Every question has a default; press Enter to take it. Nothing is changed until you confirm the summary. It then clones the repository, creates `./<name>/config` with mode 700, and writes `compose.yaml`, `box.yaml`, `.env`, and `services/<name>.yaml`. Do not run it as root: the config directory holds your login token and must belong to your user, or the container cannot write to it.
+The script asks for the service name (also the name in the Claude app), where to clone the repository (default `./<name>/workspace`, next to its config), the spawn mode, the permission mode, whether to enable phone mode, an optional browser cache, and the Git identity for Claude's commits. Every question has a default; press Enter to take it. Nothing is changed until you confirm the summary. It then clones the repository, creates `./<name>/config` with mode 700, and writes `compose.yaml`, `box.yaml`, `.env`, and `services/<name>.yaml`. Do not run it as root: the config directory holds your login token and must belong to your user, or the container cannot write to it.
 
 Then run the one-time setup for that service (here `my-project`):
 
@@ -81,7 +82,7 @@ After these, the service still waits until `setup` has marked the setup as compl
 
 ## Adding a project
 
-Run the script again in the same directory: `./add-project.sh <git-url>`. It checks that the name is not taken, adds one file, and adds one line to `compose.yaml`. Then repeat the one-time setup for the new service. Each project has its own login.
+Run the script again in the same directory: `./crb add <git-url>`. It checks that the name is not taken, adds one file, and adds one line to `compose.yaml`. Then repeat the one-time setup for the new service. Each project has its own login.
 
 The layout it creates:
 
@@ -171,11 +172,17 @@ To reset it: `docker compose down another-project && docker volume rm <stack>_an
 | `CRB_SPAWN` | `worktree` for Git projects, `same-dir` otherwise | `worktree`: each new session gets its own git worktree. `same-dir`: all sessions share `/workspace`. If you set `worktree` explicitly, the project must be a Git repository |
 | `CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX` | value of `CRB_NAME` | Prefix for new session names |
 | `CRB_RESTART_DELAY` | `30` | Seconds to wait after the server fails before the container exits and restarts |
-| `CRB_EXTRA_ARGS` | (empty) | Extra flags for `claude remote-control`, split on spaces |
+| `CRB_EXTRA_ARGS` | (empty) | Extra flags for `claude remote-control`, split on spaces. `crb add` and `crb update` set `--permission-mode acceptEdits` or `--permission-mode auto` here when you choose that mode; `default` leaves it empty. Other modes (`bypassPermissions`, `dontAsk`, `plan`) can be set by hand, see "Security model" |
 | `UID` / `GID` | `1000` | User the container runs as. Set them to your host user in `.env` so files in your project keep the right owner |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | (empty) | Git identity for commits made by Claude |
 
 Any command given to the container replaces the server, for example `docker compose run --rm -it my-project bash`.
+
+## Phone mode
+
+Phone mode is a file `CLAUDE.md` in the project's config directory, `./my-project/config/CLAUDE.md` on the host. Inside the container that directory is `/home/node/.claude`, Claude Code's user-level memory, so every session of the project reads it, including sessions in git worktrees, and it never enters your repository. The file tells Claude that you read and answer on a phone: compact replies without wide tables or pasted output, and, whenever there is a decision or a next step to choose, a question with tappable options (the `AskUserQuestion` tool, which the Claude app shows as a list) instead of an open question.
+
+`crb add` writes it when you answer yes to the phone-mode question, and `./crb update` offers it for every project that does not have it yet. It never overwrites an existing file, so edit it freely, for example if Claude ends too many replies with a question. New sessions pick it up without a restart. To turn it off, delete the file.
 
 ## Screenshots
 
@@ -191,7 +198,7 @@ Ask Claude from the phone for a screenshot of your web app, for example "show me
 The image ships Node.js 26 (LTS) on Debian 13, Git, ripgrep, the [OpenSpec](https://github.com/Fission-AI/OpenSpec) CLI, and the system libraries and fonts that a Playwright-managed Chromium needs. It contains no browser itself: each project's Playwright version downloads the browser build it expects. The Chromium libraries add about 150 MB to the image download (about 400 MB unpacked). If Claude needs to build or test something else, extend the image:
 
 ```dockerfile
-FROM ghcr.io/marc2016/claude-remote-box:0.2.0
+FROM ghcr.io/marc2016/claude-remote-box:0.3.0
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
@@ -202,17 +209,31 @@ Then use `build: .` instead of `image:` for that service.
 
 ## Versions and updating
 
-Images are tagged with the project version, for example `0.2.0`. Each release pins one Claude Code version, and the built-in auto-updater is disabled.
+Images are tagged with the project version, for example `0.3.0`. Each release pins one Claude Code version, and the built-in auto-updater is disabled.
 
 | Tag | Meaning |
 | --- | --- |
-| `0.2.0` | One release. Never changes |
+| `0.3.0` | One release. Never changes |
 | `claude-2.1.316` | Newest release with this Claude Code version |
 | `latest` | Newest release |
 
-`add-project.sh` writes `latest` into a new `box.yaml`, so `docker compose pull && docker compose up -d` always brings the newest release. To pin a release instead, set the tag in `box.yaml` or run the script as `CRB_VERSION=0.2.0 ./add-project.sh <git-url>`. To test an unreleased build, use `CRB_VERSION=edge`; the `edge` tag is published by a manual run of the image workflow.
+`crb add` writes `latest` into a new `box.yaml`, so the newest release is one `docker compose pull` away. To pin a release instead, set the tag in `box.yaml` or run `CRB_VERSION=0.3.0 ./crb add <git-url>`. To test an unreleased build, use `CRB_VERSION=edge`; the `edge` tag is published by a manual run of the image workflow.
 
-To update, change the tag in `box.yaml` (or in `compose.yaml` for a single-file setup) and run `docker compose pull && docker compose up -d`.
+### Updating
+
+```sh
+./crb update
+```
+
+One command brings the whole installation up to date, and it is safe to run at any time, also twice in a row:
+
+1. It fetches the newest `crb` from this repository and, if it differs, replaces itself and starts over with the new version. Set `CRB_SOURCE` to a URL or a local path to fetch from somewhere else. GitHub may serve a copy that is a few minutes old right after a push.
+2. If `box.yaml` pins a release tag, it offers to switch to `latest`.
+3. For every project in `services/`, it shows the current permission mode and phone-mode state and asks only about what is missing: the permission mode when none is set (Enter keeps `default`) and the phone-mode file when there is none. Projects created by hand, and single-file setups with services in `compose.yaml`, are not edited; the command prints what to add where.
+4. It shows a summary and changes nothing before you confirm. If `docker compose config -q` fails afterwards, the changed files are restored.
+5. It runs `docker compose pull`. Services whose environment changed need `docker compose up -d <name>` to pick it up, which ends their running sessions, so the command asks first (default no) and prints the command for later.
+
+To update by hand instead: change the tag in `box.yaml` (or in `compose.yaml` for a single-file setup) and run `docker compose pull && docker compose up -d`.
 
 ### Upgrading to 0.3.0
 
@@ -233,11 +254,12 @@ What the setup protects:
 - Claude can reach only `/workspace` and its own config storage. Other projects, your home directory, and the Docker socket are not mounted.
 - All Linux capabilities are dropped, privilege escalation is blocked, and the user is non-root.
 - No inbound ports. Remote Control works over outbound HTTPS.
-- Shell commands that are not pre-approved need your confirmation on the phone.
+- In `default` mode, shell commands that are not pre-approved need your confirmation on the phone. In `acceptEdits` mode, file edits inside the project run without asking, commands still ask.
 
 What it does **not** protect (yet):
 
 - **Outbound network is unrestricted.** The config storage holds your claude.ai login token. A successful prompt injection that gets a command approved could send it, or your code, somewhere else. Read permission prompts carefully. An optional egress allowlist is planned.
+- **`auto` mode moves that decision to a classifier.** With `--permission-mode auto`, Claude approves routine actions itself and asks you only for actions it judges risky. It is the mode with the least typing, and the container still limits the damage to the mounted project, but you no longer see every command before it runs, and the network and the token above are still exposed. Keep `default` if you want to see every command. `bypassPermissions` and `dontAsk` remove you from the loop entirely; the script does not offer them.
 - Anything you approve runs with full access to the mounted project.
 - The headless browser runs without its own sandbox (Playwright's default in containers), so the container is the only boundary for page content. Claude can open any URL the network allows, not only your dev server.
 
@@ -247,7 +269,7 @@ Check `docker compose logs my-project` first. After a failed start, the containe
 
 - **`waiting for setup. Run on the host: docker compose exec -it <service> setup`.** Setup is not complete yet. Run it; the server starts by itself afterwards.
 - **`cannot write to the config directory /home/node/.claude (owner 0:0, container runs as 1000:1000)`.** The config directory on the host belongs to another user, usually root because Docker created it. Run the printed `chown` on the host with the real path, for example `sudo chown -R 1000:1000 ./my-project/config`. The container continues by itself.
-- **`server exited with status N, restarting in 30s` and `if this repeats, run setup again`.** The server failed after setup, for example because "Enable Remote Control?" was never answered or the login expired. Run `setup` again.
+- **`server exited with status N, restarting in 30s` and `if this repeats, run setup again`.** The server failed after setup, for example because "Enable Remote Control?" was never answered or the login expired. Run `setup` again. If the log above the message mentions the permission mode, the value in `CRB_EXTRA_ARGS` is misspelled or not available for your account: fix or remove it in `services/<name>.yaml` and run `docker compose up -d <name>`; `setup` does not help in that case.
 - **`You must be logged in to use Remote Control`.** The login is missing or expired. Run `setup` again.
 - **`Workspace not trusted`.** The trust question was answered with "no". Run `setup` again.
 - **`CRB_NAME is not set`.** The service has no `CRB_NAME` in its `environment:`. Add it; `setup` reports the same.
