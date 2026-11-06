@@ -228,7 +228,7 @@ Ask Claude from the phone for a screenshot of your web app, for example "show me
 The image ships Node.js 26 (LTS) on Debian 13, Git, ripgrep, the [OpenSpec](https://github.com/Fission-AI/OpenSpec) CLI, and the system libraries and fonts that a Playwright-managed Chromium needs. It contains no browser itself: each project's Playwright version downloads the browser build it expects. The Chromium libraries add about 150 MB to the image download (about 400 MB unpacked). If Claude needs to build or test something else, extend the image:
 
 ```dockerfile
-FROM ghcr.io/marc2016/claude-remote-box:1.0.0
+FROM ghcr.io/marc2016/claude-remote-box:1.0.1
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
@@ -239,15 +239,15 @@ Then use `build: .` instead of `image:` for that service.
 
 ## Versions and updating
 
-Images are tagged with the project version, for example `1.0.0`. Each release pins one Claude Code version, and the built-in auto-updater is disabled.
+Images are tagged with the project version, for example `1.0.1`. Each release pins one Claude Code version, and the built-in auto-updater is disabled.
 
 | Tag | Meaning |
 | --- | --- |
-| `1.0.0` | One release. Never changes |
+| `1.0.1` | One release. Never changes |
 | `claude-2.1.316` | Newest release with this Claude Code version |
 | `latest` | Newest release |
 
-`crb add` writes `latest` into a new `box.yaml`, so the newest release is one `docker compose pull` away. To pin a release instead, set the tag in `box.yaml` or run `CRB_VERSION=1.0.0 ./crb add <git-url>`. To test an unreleased build, use `CRB_VERSION=edge`; the `edge` tag is published by a manual run of the image workflow.
+`crb add` writes `latest` into a new `box.yaml`, so the newest release is one `docker compose pull` away. To pin a release instead, set the tag in `box.yaml` or run `CRB_VERSION=1.0.1 ./crb add <git-url>`. To test an unreleased build, use `CRB_VERSION=edge`; the `edge` tag is published by a manual run of the image workflow.
 
 ### Updating
 

@@ -8,7 +8,7 @@
 #   docker compose up -d my-project && docker compose exec -it my-project setup
 
 x-box: &box
-  image: ghcr.io/marc2016/claude-remote-box:1.0.0
+  image: ghcr.io/marc2016/claude-remote-box:1.0.1
   restart: unless-stopped
   user: "${UID:-1000}:${GID:-1000}"
   cap_drop: [ALL]
