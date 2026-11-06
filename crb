@@ -21,6 +21,24 @@ CRB_SOURCE="${CRB_SOURCE:-https://raw.githubusercontent.com/marc2016/Claude-Remo
 die() { echo "❌ $*" >&2; exit 1; }
 warn() { echo "⚠️  $*"; }
 
+# banner TITLE: Clawd in its box, then the title line.
+banner() {
+  cat <<'EOF'
+
+    +-------------------------------------+          .------.
+    |                                     |          | .--. |
+    |          .-------------------.      |   )))    | |##| |
+    |          |    ##       ##    |      |  )))     | '--' |
+    |        .-+    ##       ##    +-.    | )))      |      |
+    |        |_|                   |_|    |          | [__] |
+    |          '-------------------'      |          '------'
+    |            |_|  |_|   |_|  |_|      |
+    +-------------------------------------+
+EOF
+  echo "🧰 Claude-Remote-Box: $1"
+  echo "========================================"
+}
+
 usage() {
   echo "Usage: ./crb add [git-url]   Projekt hinzufügen"
   echo "       ./crb update          Skript, Image und Projekte aktualisieren"
@@ -191,8 +209,7 @@ check_host() {
 # =============================================================================
 
 cmd_add() {
-  echo "🧰 Claude-Remote-Box: Projekt hinzufügen"
-  echo "========================================"
+  banner "Projekt hinzufügen"
 
   # --- Checks (nothing is changed before the confirmation) -------------------
 
@@ -543,8 +560,7 @@ cmd_update() {
   local do_self_update=1
   if [ "${1-}" = "--no-self-update" ]; then do_self_update=0; fi
 
-  echo "🧰 Claude-Remote-Box: Installation aktualisieren"
-  echo "================================================"
+  banner "Installation aktualisieren"
 
   check_host
   [ -f compose.yaml ] || die "Hier liegt keine compose.yaml. Bitte im Ordner der Installation ausführen."
@@ -591,7 +607,7 @@ cmd_update() {
       current=$(printf '%s' "$extra" | sed -n -E 's/.*--permission-mode[= ]([^[:space:]]+).*/\1/p')
       has_file=0; [ -f "$n/config/CLAUDE.md" ] && has_file=1
       echo ""
-      echo "   Projekt $n"
+      echo "━━━ Projekt: $n ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
       permission=""
       if [ -n "$current" ]; then
         echo "   Permission:   $current (bleibt)"
