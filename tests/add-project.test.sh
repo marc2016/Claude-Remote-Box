@@ -50,6 +50,7 @@ check "summary shows defaults" 'out | grep -q "Service:      flashagenda" && out
 check "repository cloned" '[ -d "$D/flashagenda/workspace/.git" ]'
 check "workspace mount is relative" 'grep -q "\"../flashagenda/workspace:/workspace\"" "$D/services/flashagenda.yaml"'
 check "config dir mode 700" '[ "$(ls -ld "$D/flashagenda/config" | cut -c1-10)" = "drwx------" ]'
+check "box.yaml uses latest" 'grep -q "image: ghcr.io/marc2016/claude-remote-box:latest" "$D/box.yaml"'
 check "base files created" '[ -f "$D/compose.yaml" ] && [ -f "$D/box.yaml" ] && [ -f "$D/.env" ] && [ -f "$D/services/flashagenda.yaml" ]'
 check ".env has host UID/GID" 'grep -qx "UID=$(id -u)" "$D/.env" && grep -qx "GID=$(id -g)" "$D/.env"'
 check "compose config valid" '(cd "$D" && docker compose config -q)'
@@ -84,6 +85,12 @@ run "$D" "\n$WORK/existing\ny\n\n\n\n\ny\n" "$REPO"
 check "exit 0" '[ "$(rc)" -eq 0 ]'
 check "not cloned" '[ ! -d "$WORK/existing/.git" ] && [ -f "$WORK/existing/marker" ]'
 check "mounted as workspace" '(cd "$D" && docker compose config flashagenda) | grep -q "source: $WORK/existing"'
+
+echo "Image tag can be overridden"
+D="$WORK/t-edge"; mkdir -p "$D"
+(cd "$D" && printf 'edge\n\n\n\n\n\ny\n' | CRB_VERSION=edge "$SCRIPT" "$REPO") >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
+check "exit 0" '[ "$(rc)" -eq 0 ]'
+check "box.yaml uses edge" 'grep -q "image: ghcr.io/marc2016/claude-remote-box:edge" "$D/box.yaml" && out | grep -q "box.yaml (Image ghcr.io/marc2016/claude-remote-box:edge)"'
 
 echo "Project folder around the config is refused"
 D="$WORK/t-nest"; mkdir -p "$D"

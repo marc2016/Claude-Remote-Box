@@ -2,7 +2,7 @@
 # services/ extends the `box` service from here. See README, "Adding a project".
 services:
   box:
-    image: ghcr.io/marc2016/claude-remote-box:0.2.0
+    image: ghcr.io/marc2016/claude-remote-box:latest
     restart: unless-stopped
     user: "${UID:-1000}:${GID:-1000}"
     cap_drop: [ALL]

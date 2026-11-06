@@ -2,6 +2,8 @@
 # Adds a project service to a claude-remote-box setup.
 # Run it in the directory that holds compose.yaml, or in an empty directory
 # to start a new setup. Usage: ./add-project.sh [git-url]
+# A new box.yaml uses the newest release (latest). Override the tag to pin a
+# release or test an unreleased build: CRB_VERSION=edge ./add-project.sh
 #
 # Layout: compose.yaml lists services/<name>.yaml under `include:`, and each of
 # those files extends the hardened `box` service from box.yaml.
@@ -9,7 +11,7 @@
 
 set -euo pipefail
 
-CRB_VERSION="0.2.0"
+CRB_VERSION="${CRB_VERSION:-latest}"
 CRB_IMAGE="ghcr.io/marc2016/claude-remote-box:${CRB_VERSION}"
 
 die() { echo "❌ $*" >&2; exit 1; }
@@ -201,9 +203,8 @@ echo "  Git:          ${git_name:-<keiner>} <${git_email:-keine}>"
 echo "  Config:       ./$config_dir (chmod 700)"
 if [ "$browsers" -eq 1 ]; then echo "  Browser:      Volume $name-browsers"; fi
 echo "  Compose:      $service_file, eingetragen in compose.yaml"
-for f in compose.yaml box.yaml; do
-  if [ ! -f "$f" ]; then echo "  Neu:          $f"; fi
-done
+if [ ! -f compose.yaml ]; then echo "  Neu:          compose.yaml"; fi
+if [ ! -f box.yaml ]; then echo "  Neu:          box.yaml (Image $CRB_IMAGE)"; fi
 if [ ! -f .env ] && [ "$include_mode" = create ]; then
   echo "  Neu:          .env (UID=$(id -u), GID=$(id -g))"
 fi

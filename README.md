@@ -210,13 +210,15 @@ Images are tagged with the project version, for example `0.2.0`. Each release pi
 | `claude-2.1.316` | Newest release with this Claude Code version |
 | `latest` | Newest release |
 
+`add-project.sh` writes `latest` into a new `box.yaml`, so `docker compose pull && docker compose up -d` always brings the newest release. To pin a release instead, set the tag in `box.yaml` or run the script as `CRB_VERSION=0.2.0 ./add-project.sh <git-url>`. To test an unreleased build, use `CRB_VERSION=edge`; the `edge` tag is published by a manual run of the image workflow.
+
 To update, change the tag in `box.yaml` (or in `compose.yaml` for a single-file setup) and run `docker compose pull && docker compose up -d`.
 
 ### Upgrading to 0.3.0
 
 From 0.3.0 on, a service without completed setup waits instead of restarting, and `setup` replaces the three manual steps. Existing services need nothing: if the config already holds a login and the workspace trust when the container starts, the server starts directly. If it waits after the update, run `docker compose exec -it <service> setup` once.
 
-When releasing: bump the image tag in `compose.example.yaml`, `box.yaml`, and `CRB_VERSION` in `add-project.sh` together. The `2.1.316` tag from the very first release stays available but is not updated.
+When releasing: bump the image tag in `compose.example.yaml` and in the README examples. The `2.1.316` tag from the very first release stays available but is not updated.
 
 ## Git workflow
 
