@@ -47,6 +47,7 @@ function sessionCard(s, gitBox, nowMs) {
     state: sessionState({ ended_at: s.ended_at, waiting_since: s.waiting_since, last: s.last_activity ?? s.last }, nowMs),
     waiting_since: s.waiting_since ?? null,
     waiting_text: s.waiting_text ?? null,
+    last_tool: s.last_tool ?? null,
     last_activity: s.last_activity ?? s.last ?? null,
     ended_at: s.ended_at ?? null,
     url: sessionUrl(s.id),

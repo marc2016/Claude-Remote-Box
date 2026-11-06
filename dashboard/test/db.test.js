@@ -2,6 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../server/db.js';
 import { buildCards } from '../server/cards.js';
+import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+const require_sqlite = () => createRequire(import.meta.url)('node:sqlite');
 
 const T0 = Date.parse('2026-11-06T12:00:00Z');
 const iso = (offsetS) => new Date(T0 + offsetS * 1000).toISOString();
@@ -83,6 +88,26 @@ test('pruning removes old events and keeps recent sessions', () => {
   assert.equal(r.sessions, 0, 'session 30 days old is kept');
   assert.equal(store.sessionEvents('new').length, 1);
   assert.equal(store.sessionEvents('old').length, 0);
+});
+
+test('last tool call is kept, old databases get the column', () => {
+  const store = openDb(':memory:');
+  store.ingest([ev('session_start', { session: 's1' }), ev('tool', { session: 's1', tool: 'Bash', summary: 'npm test', call_id: 'c1' })], new Date(T0));
+  assert.equal(buildCards(store, T0).boxes[0].sessions[0].last_tool, 'Bash: npm test');
+  // A database file from before the column existed gets it on open.
+  const { DatabaseSync } = require_sqlite();
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'crb-db-')), 'old.sqlite');
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, box TEXT NOT NULL, label TEXT, model TEXT, tokens_in INTEGER DEFAULT 0, tokens_out INTEGER DEFAULT 0,
+    cache_read INTEGER DEFAULT 0, cache_write INTEGER DEFAULT 0, context INTEGER DEFAULT 0, turns INTEGER DEFAULT 0, tool_calls INTEGER DEFAULT 0,
+    started TEXT, last TEXT, last_activity TEXT, cost_usd REAL, lines_added INTEGER, lines_removed INTEGER, permission_mode TEXT, branch TEXT, cwd TEXT, git_json TEXT,
+    waiting_since TEXT, waiting_text TEXT, ended_at TEXT, sidechain INTEGER DEFAULT 0)`);
+  old.close();
+  const upgraded = openDb(file);
+  assert.ok(upgraded.db.prepare('PRAGMA table_info(sessions)').all().some((c) => c.name === 'last_tool'));
+  upgraded.ingest([ev('session_start', { session: 's9' }), ev('tool', { session: 's9', tool: 'Read', summary: '/x', call_id: 'c9' })], new Date(T0));
+  assert.equal(buildCards(upgraded, T0).boxes[0].sessions[0].last_tool, 'Read: /x');
+  upgraded.close();
 });
 
 test('events outside the contract are stored but harmless', () => {

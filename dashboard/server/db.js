@@ -25,7 +25,8 @@ export function openDb(file) {
       started TEXT, last TEXT, last_activity TEXT,
       cost_usd REAL, lines_added INTEGER, lines_removed INTEGER,
       permission_mode TEXT, branch TEXT, cwd TEXT, git_json TEXT,
-      waiting_since TEXT, waiting_text TEXT, ended_at TEXT, sidechain INTEGER DEFAULT 0
+      waiting_since TEXT, waiting_text TEXT, ended_at TEXT, sidechain INTEGER DEFAULT 0,
+      last_tool TEXT
     );
     CREATE INDEX IF NOT EXISTS sessions_box ON sessions (box, last);
     CREATE TABLE IF NOT EXISTS boxes (
@@ -33,6 +34,9 @@ export function openDb(file) {
       claude_version TEXT, spawn TEXT, uptime_s INTEGER, git_json TEXT, updated TEXT
     );
   `);
+  // Columns added after the first release, for databases created before them.
+  const cols = db.prepare('PRAGMA table_info(sessions)').all().map((c) => c.name);
+  if (!cols.includes('last_tool')) db.exec('ALTER TABLE sessions ADD COLUMN last_tool TEXT');
   return new Store(db);
 }
 
@@ -116,6 +120,8 @@ export class Store {
         touch();
         break;
       case 'tool':
+        db.prepare('UPDATE sessions SET last_tool = ?, ended_at = NULL WHERE id = ?')
+          .run([ev.tool, ev.summary].filter(Boolean).join(': ') || null, id);
         touch();
         break;
       case 'waiting':

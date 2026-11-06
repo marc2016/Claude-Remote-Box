@@ -88,6 +88,7 @@ export interface SessionCard {
   state: SessionActivity;
   waiting_since: string | null;
   waiting_text: string | null;
+  last_tool: string | null;
   last_activity: string | null;
   ended_at: string | null;
   url: string | null;
