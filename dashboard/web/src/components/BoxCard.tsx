@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ChevronDown, Copy, ExternalLink, GitBranch, Hourglass, Loader2, Moon, Terminal, Check, X } from 'lucide-react';
+import { ChevronDown, Copy, ExternalLink, GitBranch, Hourglass, Terminal, Check, X } from 'lucide-react';
 import type { BoxCard as BoxCardModel, SessionCard, TimelineEvent } from '@shared/types';
 import { modelLabel } from '@shared/model.js';
 import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card';
@@ -9,6 +9,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Progress } from '@/components/ui/progress';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Clawd, type ClawdPose } from '@/components/Clawd';
 import { fetchTimeline } from '@/lib/api';
 import { cn, fmtDuration, fmtTime, fmtTokens } from '@/lib/utils';
 
@@ -45,6 +46,7 @@ export function BoxCard({ box, now }: { box: BoxCardModel; now: number }) {
       </CardHeader>
 
       <CardContent className="flex flex-col gap-3">
+        <Stage box={box} s={active} now={now} />
         {setupPending && box.up ? (
           <Alert>
             <Terminal />
@@ -57,9 +59,7 @@ export function BoxCard({ box, now }: { box: BoxCardModel; now: number }) {
           </Alert>
         ) : active ? (
           <SessionBlock s={active} now={now} up={box.up} />
-        ) : (
-          <p className="text-muted-foreground text-sm">Noch keine Session.</p>
-        )}
+        ) : null}
       </CardContent>
 
       {active && (
@@ -85,14 +85,12 @@ function SessionBlock({ s, now, up }: { s: SessionCard; now: number; up: boolean
   const ratio = s.context_window ? Math.min(100, Math.round((s.context / s.context_window) * 100)) : 0;
   return (
     <>
-      {s.state === 'waiting' && up ? (
+      {s.state === 'waiting' && up && (
         <Alert variant="warning">
           <Hourglass />
           <AlertTitle>Wartet auf dich{s.waiting_since ? ` · ${fmtDuration(now - Date.parse(s.waiting_since))}` : ''}</AlertTitle>
           {s.waiting_text && <AlertDescription><span className="break-all font-mono text-xs">{s.waiting_text}</span></AlertDescription>}
         </Alert>
-      ) : (
-        <ActivityLine s={s} now={now} up={up} />
       )}
 
       <div className="flex flex-col gap-1.5">
@@ -129,12 +127,33 @@ function SessionBlock({ s, now, up }: { s: SessionCard; now: number; up: boolean
   );
 }
 
-function ActivityLine({ s, now, up }: { s: SessionCard; now: number; up: boolean }) {
-  if (!up) return <p className="text-muted-foreground flex items-center gap-2 text-sm"><Moon className="size-4" /> Box offline</p>;
-  if (s.state === 'ended') return <p className="text-muted-foreground flex items-center gap-2 text-sm"><Moon className="size-4" /> Session beendet {s.ended_at ? fmtTime(s.ended_at) : ''}</p>;
-  if (s.state === 'working') return <p className="flex items-center gap-2 text-sm"><Loader2 className="size-4 animate-spin" /> arbeitet</p>;
-  const since = s.last_activity ? fmtDuration(now - Date.parse(s.last_activity)) : '';
-  return <p className="text-muted-foreground flex items-center gap-2 text-sm"><Moon className="size-4" /> idle{since ? ` seit ${since}` : ''}</p>;
+// The stage: Clawd acts out the state, the activity text stands to his right.
+function Stage({ box, s, now }: { box: BoxCardModel; s: SessionCard | null; now: number }) {
+  let pose: ClawdPose;
+  let text: string;
+  let muted = true;
+  if (!box.up) {
+    pose = 'sleep'; text = 'Box offline';
+  } else if (box.phase === 'waiting-setup' || box.phase === 'waiting-config') {
+    pose = 'wrench'; text = box.phase === 'waiting-setup' ? 'wartet auf Setup' : 'wartet auf den Config-Ordner';
+  } else if (!s) {
+    pose = 'sit'; text = 'noch keine Session';
+  } else if (s.state === 'ended') {
+    pose = 'sleep'; text = `Session beendet${s.ended_at ? ' ' + fmtTime(s.ended_at) : ''}`;
+  } else if (s.state === 'waiting') {
+    pose = 'wait'; text = 'wartet auf dich'; muted = false;
+  } else if (s.state === 'working') {
+    pose = 'walk'; text = 'arbeitet'; muted = false;
+  } else {
+    const since = s.last_activity ? fmtDuration(now - Date.parse(s.last_activity)) : '';
+    pose = 'sit'; text = `idle${since ? ` seit ${since}` : ''}`;
+  }
+  return (
+    <div className="flex h-6 min-w-0 items-center gap-3">
+      <div className="clawd-track min-w-0 flex-1"><Clawd pose={pose} /></div>
+      <span className={cn('shrink-0 text-sm', muted && 'text-muted-foreground')}>{text}</span>
+    </div>
+  );
 }
 
 function SessionLink({ s }: { s: SessionCard }) {

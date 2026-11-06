@@ -94,3 +94,8 @@ New component; nothing changes for installations that do not run `crb dashboard`
 ## Open Questions
 
 - The exact URL pattern that opens a session in the Claude app (task 1.1). Changes one function in the web app.
+
+## Archived with open items
+
+Archived on 2026-11-06 ahead of two tasks, so that `card-mascot` could build on the main spec: 1.1 (the session URL pattern; `sessionUrl()` returns `null`, the card shows the id with a copy button) and 7.1 (field test on the Mini-PC; the `edge` dashboard image was being published at the time). Both stay valid work; the next change that touches the card should pick up 1.1, and the field test is part of the 0.3.0 release check.
+

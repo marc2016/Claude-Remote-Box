@@ -200,6 +200,8 @@ docker compose up -d   # starts the dashboard and recreates the boxes
 
 **Where it is reachable.** By default the port is bound to `127.0.0.1:8080` on the host, so only an SSH tunnel or a reverse proxy on that machine reaches it. Set `CRB_DASHBOARD_BIND` in `.env` to change that, for example `0.0.0.0:8080` for the LAN or the address of a VPN interface such as Tailscale. **There is no login yet.** Whoever reaches the page sees your prompts and Claude's replies. Keep it on a private network or behind a VPN; authentication is planned as the next step.
 
+To see the dashboard with dummy data on any machine with Node 22+, without boxes: `cd dashboard && npm install && npm run demo`, then open `http://127.0.0.1:8080`. The demo shows one box in every state, including an animated Clawd per card.
+
 The session link on a card opens the session in the Claude app once the URL pattern is confirmed; until then the card offers the session id to copy. `./crb update` adds the two status variables to an installation that got the dashboard by hand. To remove the dashboard: delete `services/crb-dashboard.yaml`, its line in `compose.yaml`, and the two variables in `box.yaml`, then `docker compose up -d`.
 
 ## Status reporting

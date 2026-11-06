@@ -23,6 +23,7 @@
   --warning: oklch(0.769 0.188 70.08);
   --warning-foreground: oklch(0.28 0.07 60);
   --success: oklch(0.723 0.219 149.579);
+  --clawd: oklch(0.72 0.14 45);
   --radius: 0.625rem;
 }
 
@@ -47,6 +48,7 @@
     --warning: oklch(0.795 0.184 86.047);
     --warning-foreground: oklch(0.95 0.05 90);
     --success: oklch(0.696 0.17 162.48);
+    --clawd: oklch(0.76 0.14 45);
   }
 }
 
@@ -70,6 +72,7 @@
   --color-warning: var(--warning);
   --color-warning-foreground: var(--warning-foreground);
   --color-success: var(--success);
+  --color-clawd: var(--clawd);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -79,4 +82,52 @@
 @layer base {
   * { @apply border-border outline-ring/50; }
   body { @apply bg-background text-foreground antialiased; }
+}
+
+/* --- Clawd, the mascot on each card --------------------------------------- */
+
+.clawd-track { position: relative; height: 24px; overflow: hidden; }
+.clawd { position: absolute; left: 0; top: 0; width: 32px; height: 24px; color: var(--color-clawd); }
+.clawd-svg { display: block; fill: currentColor; }
+.clawd-eye { fill: var(--color-card); }
+.clawd-figure, .clawd-body, .clawd-legs-a, .clawd-legs-b, .clawd-eyes, .clawd-wrench, .clawd-bang { transform-box: fill-box; }
+.clawd-figure { transform-origin: 50% 100%; }
+.clawd-legs-a, .clawd-legs-b { transform-origin: 50% 0; }
+.clawd-eyes { transform-origin: 50% 50%; }
+
+/* walk: across the track and back, facing the way he goes */
+.clawd[data-pose="walk"] { animation: clawd-walk 7s linear infinite alternate; }
+.clawd[data-pose="walk"] .clawd-svg { animation: clawd-face 14s steps(1, end) infinite; }
+.clawd[data-pose="walk"] .clawd-body { animation: clawd-bob 0.32s steps(2, end) infinite; }
+.clawd[data-pose="walk"] .clawd-legs-a { animation: clawd-step 0.32s steps(2, end) infinite; }
+.clawd[data-pose="walk"] .clawd-legs-b { animation: clawd-step 0.32s steps(2, end) infinite reverse; }
+/* sit: breathe and blink */
+.clawd[data-pose="sit"] .clawd-figure { animation: clawd-breathe 3s ease-in-out infinite; }
+.clawd[data-pose="sit"] .clawd-eyes { animation: clawd-blink 4s steps(1, end) infinite; }
+/* wait: bounce, the "!" pulses */
+.clawd[data-pose="wait"] .clawd-figure { animation: clawd-bounce 0.6s ease-out infinite alternate; }
+.clawd[data-pose="wait"] .clawd-bang { animation: clawd-pulse 0.6s ease-in-out infinite alternate; }
+/* sleep: lying on the side, grey, z z z */
+.clawd[data-pose="sleep"] { color: var(--color-muted-foreground); }
+.clawd[data-pose="sleep"] .clawd-figure { transform-box: view-box; transform-origin: 8px 8px; transform: translateY(-2px) rotate(-90deg); }
+.clawd[data-pose="sleep"] .clawd-z { animation: clawd-zzz 2.4s ease-out infinite; opacity: 0; }
+.clawd[data-pose="sleep"] .clawd-z:nth-child(2) { animation-delay: 0.8s; }
+.clawd[data-pose="sleep"] .clawd-z:nth-child(3) { animation-delay: 1.6s; }
+/* wrench: standing still, tool wiggles */
+.clawd[data-pose="wrench"] .clawd-wrench { animation: clawd-wrench 1s ease-in-out infinite alternate; }
+
+@keyframes clawd-walk { from { left: 0; } to { left: calc(100% - 32px); } }
+@keyframes clawd-face { 0% { transform: scaleX(1); } 50% { transform: scaleX(-1); } }
+@keyframes clawd-step { 0% { transform: translateY(0); } 50% { transform: translateY(-1px); } 100% { transform: translateY(0); } }
+@keyframes clawd-bob { 0% { transform: translateY(0); } 50% { transform: translateY(-0.5px); } 100% { transform: translateY(0); } }
+@keyframes clawd-breathe { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(1.04); } }
+@keyframes clawd-blink { 0%, 93% { transform: scaleY(1); } 94%, 97% { transform: scaleY(0.1); } 98%, 100% { transform: scaleY(1); } }
+@keyframes clawd-bounce { from { transform: translateY(0); } to { transform: translateY(-3px); } }
+@keyframes clawd-pulse { from { opacity: 0.5; transform: translateY(0); } to { opacity: 1; transform: translateY(-1px); } }
+@keyframes clawd-zzz { 0% { opacity: 0; transform: translateY(2px); } 30% { opacity: 1; } 100% { opacity: 0; transform: translateY(-3px); } }
+@keyframes clawd-wrench { from { transform: rotate(-8deg); } to { transform: rotate(8deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .clawd, .clawd * { animation: none !important; }
+  .clawd[data-pose="sleep"] .clawd-z { opacity: 1; }
 }

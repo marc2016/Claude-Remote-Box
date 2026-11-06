@@ -11,7 +11,8 @@
     "build": "vite build --config web/vite.config.ts",
     "typecheck": "tsc -p web/tsconfig.json --noEmit",
     "test": "node --test test/",
-    "seed": "node seed.mjs"
+    "seed": "node seed.mjs",
+    "demo": "node demo.mjs"
   },
   "devDependencies": {
     "@radix-ui/react-collapsible": "1.2.1",

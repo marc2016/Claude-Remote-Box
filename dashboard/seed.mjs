@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Posts a realistic event stream to a running dashboard, for development
 // without boxes. Usage: CRB_STATUS_TOKEN=t node seed.mjs [http://127.0.0.1:8080]
-// Three boxes: one waiting for approval, one working, one in waiting-setup,
-// then keeps the heartbeats going until Ctrl-C.
+// Four boxes: one waiting for approval, one working, one in waiting-setup,
+// one whose session ended; then keeps the heartbeats going until Ctrl-C.
 const base = process.argv[2] || 'http://127.0.0.1:8080';
 const token = process.env.CRB_STATUS_TOKEN || 'dev';
 const seqs = {};
@@ -40,13 +40,20 @@ await post([
   ev('looptalk', 'summary', { session: 'sess-loop-1', model: 'claude-sonnet-5-5', tokens_in: 120, tokens_out: 6100, cache_read: 380000, cache_write: 12000, context: 31000, turns: 4, tool_calls: 9, started: now(), last: now() }),
 
   ev('flashagenda', 'phase', { phase: 'waiting-setup' }), hb('flashagenda', 'waiting-setup'),
+
+  ev('archiv', 'phase', { phase: 'running' }), hb('archiv', 'running'),
+  ev('archiv', 'session_start', { session: 'sess-archiv-1', cwd: '/workspace', branch: 'main', permission_mode: 'default' }),
+  ev('archiv', 'prompt', { session: 'sess-archiv-1', text: 'Changelog für 0.2.0 schreiben' }),
+  ev('archiv', 'reply', { session: 'sess-archiv-1', text: 'Erledigt, der Changelog steht in CHANGELOG.md.' }),
+  ev('archiv', 'summary', { session: 'sess-archiv-1', model: 'claude-haiku-5-5', tokens_in: 40, tokens_out: 900, cache_read: 20000, cache_write: 0, context: 12000, turns: 2, tool_calls: 3, started: now(), last: now() }),
+  ev('archiv', 'session_end', { session: 'sess-archiv-1', reason: 'idle' }),
 ]);
 console.log(`seeded ${base}; heartbeats every 30 s, Ctrl-C to stop`);
 
 let i = 0;
 setInterval(async () => {
   i += 1;
-  const batch = [hb('janus-note-vs', 'running'), hb('looptalk', 'running'), hb('flashagenda', 'waiting-setup')];
+  const batch = [hb('janus-note-vs', 'running'), hb('looptalk', 'running'), hb('flashagenda', 'waiting-setup'), hb('archiv', 'running')];
   if (i % 2 === 0) batch.push(ev('looptalk', 'tool', { session: 'sess-loop-1', tool: 'Bash', summary: `npm test -- player (${i})`, call_id: `l${i + 10}` }), ev('looptalk', 'tool_result', { session: 'sess-loop-1', call_id: `l${i + 10}`, ok: i % 4 !== 0 }));
   await post(batch).catch((e) => console.error(e.message));
 }, 30000);
