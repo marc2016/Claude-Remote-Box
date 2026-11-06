@@ -269,7 +269,7 @@ To update by hand instead: change the tag in `box.yaml` (or in `compose.yaml` fo
 
 From 0.3.0 on, a service without completed setup waits instead of restarting, and `setup` replaces the three manual steps. Existing services need nothing: if the config already holds a login and the workspace trust when the container starts, the server starts directly. If it waits after the update, run `docker compose exec -it <service> setup` once.
 
-When releasing: bump the image tag in `compose.example.yaml` and in the README examples. The `2.1.316` tag from the very first release stays available but is not updated.
+To release, run `./release.sh` on a clean `main`: it runs the tests, bumps the version in the README examples, `compose.example.yaml`, and the dashboard's `package.json`, commits, tags `vX.Y.Z`, and pushes; the tag makes the image workflow publish both images. `--quick` skips the container tests, `--dry-run` only shows what would change. The `2.1.316` tag from the very first release stays available but is not updated.
 
 ## Git workflow
 
