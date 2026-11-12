@@ -4,6 +4,7 @@ import type { BoxCard as BoxCardModel } from '@shared/types';
 import { Button } from '@/components/ui/button';
 import { Clawd } from '@/components/Clawd';
 import { Skeleton } from '@/components/ui/skeleton';
+import { GitOverview } from '@/components/GitOverview';
 
 // The conversation pulls in the Markdown renderer; load it only when a detail view opens.
 const Conversation = lazy(() => import('@/components/Conversation').then((m) => ({ default: m.Conversation })));
@@ -47,6 +48,8 @@ export function DetailView({ box, now, tick, onClose }: { box: BoxCardModel; now
               <span className="min-w-0 truncate">{active ? `${active.turns} Züge · ${active.tool_calls} Tools` : '–'}</span>
               <SessionLink s={active} />
             </div>
+            <GitOverview git={box.git} now={now} compact className="md:hidden" />
+            <GitOverview git={box.git} now={now} className="hidden border-t pt-3 md:flex" />
             <div className="hidden md:block"><SessionLink s={active} /></div>
           </div>
         </section>

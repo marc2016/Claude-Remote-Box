@@ -65,5 +65,49 @@ export function sessionState(s, nowMs) {
   return 'idle';
 }
 
+/**
+ * The words after the branch name: push state, then changed files. With an
+ * unknown remote state (a box from before these fields) it is the commits
+ * ahead of the default branch, as before.
+ * @param {{ ahead?: number, dirty?: number, remote?: 'ok' | 'none' | 'gone', unpushed?: number | null, behind?: number | null } | null | undefined} w
+ * @returns {string[]}
+ */
+export function gitStateParts(w) {
+  if (!w) return [];
+  const parts = [];
+  const ahead = w.ahead ?? 0;
+  switch (w.remote) {
+    case 'ok':
+      if (w.unpushed) parts.push(`${w.unpushed} nicht gepusht`);
+      if (w.behind) parts.push(`${w.behind} hinter`);
+      if (!w.unpushed && !w.behind) parts.push('gepusht');
+      break;
+    case 'none':
+      if (ahead > 0) parts.push('nicht auf origin');
+      break;
+    case 'gone':
+      parts.push('auf origin gelöscht');
+      break;
+    default:
+      if (ahead > 0) parts.push(`${ahead} Commit${ahead === 1 ? '' : 's'} vor`);
+  }
+  if (w.dirty) parts.push(`${w.dirty} geändert`);
+  return parts;
+}
+
+/**
+ * Counts for the one-line summary of a box's checkouts.
+ * @param {Array<{ ahead?: number, remote?: string, unpushed?: number | null, behind?: number | null }>} worktrees
+ * @returns {{ unpushed: number, behind: number }}
+ */
+export function gitSummary(worktrees) {
+  let unpushed = 0; let behind = 0;
+  for (const w of worktrees) {
+    if ((w.remote === 'ok' && w.unpushed) || (w.remote === 'none' && (w.ahead ?? 0) > 0)) unpushed += 1;
+    if (w.remote === 'ok' && w.behind) behind += 1;
+  }
+  return { unpushed, behind };
+}
+
 /** Event types the UI shows in a session timeline. */
 export const TIMELINE_TYPES = ['prompt', 'reply', 'tool', 'tool_result', 'waiting', 'resumed'];

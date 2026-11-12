@@ -3,8 +3,8 @@ import { boxUp, sessionState, contextWindow, sessionUrl } from '../shared/model.
 
 export function buildCards(store, nowMs = Date.now()) {
   const boxes = store.boxes().map((b) => {
-    const gitBox = b.git_json ? safeJson(b.git_json, []) : [];
-    const sessions = store.sessionsOf(b.name).map((s) => sessionCard(s, gitBox, nowMs));
+    const git = boxGit(b.git_json);
+    const sessions = store.sessionsOf(b.name).map((s) => sessionCard(s, git?.worktrees, nowMs));
     const active = sessions.find((s) => s.state !== 'ended');
     return {
       name: b.name,
@@ -15,6 +15,7 @@ export function buildCards(store, nowMs = Date.now()) {
       claude_version: b.claude_version ?? null,
       spawn: b.spawn ?? null,
       permission_mode: active?.permission_mode ?? sessions[0]?.permission_mode ?? null,
+      git,
       sessions,
     };
   });
@@ -51,6 +52,21 @@ function sessionCard(s, gitBox, nowMs) {
     last_activity: s.last_activity ?? s.last ?? null,
     ended_at: s.ended_at ?? null,
     url: sessionUrl(s.id),
+  };
+}
+
+// The stored git state of a box: `{ worktrees, fetched_at }`, or the bare
+// worktree array of rows written before the fetch time existed. The workspace's
+// own checkout comes first.
+function boxGit(json) {
+  if (!json) return null;
+  const stored = safeJson(json, null);
+  const worktrees = Array.isArray(stored) ? stored : Array.isArray(stored?.worktrees) ? stored.worktrees : null;
+  if (!worktrees || !worktrees.length) return null;
+  const first = (w) => (w.path === '/workspace' ? 0 : 1);
+  return {
+    fetched_at: Array.isArray(stored) ? null : stored.fetched_at ?? null,
+    worktrees: worktrees.map((w, i) => [w, i]).sort((a, b) => first(a[0]) - first(b[0]) || a[1] - b[1]).map(([w]) => w),
   };
 }
 

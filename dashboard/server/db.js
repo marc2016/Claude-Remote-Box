@@ -109,7 +109,9 @@ export class Store {
           .run(ev.phase ?? null, received, ev.image ?? null, ev.claude_version ?? null, ev.spawn ?? null, ev.uptime_s ?? null, ev.box);
         break;
       case 'git':
-        db.prepare('UPDATE boxes SET git_json = ? WHERE name = ?').run(JSON.stringify(ev.worktrees ?? []), ev.box);
+        // Stored as an object; rows written before `fetched_at` existed hold the bare array.
+        db.prepare('UPDATE boxes SET git_json = ? WHERE name = ?')
+          .run(JSON.stringify({ worktrees: Array.isArray(ev.worktrees) ? ev.worktrees : [], fetched_at: ev.fetched_at ?? null }), ev.box);
         break;
       default:
         if (ev.session) this.applySession(ev, ts);

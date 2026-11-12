@@ -4,6 +4,8 @@
 #                         empty directory)
 #   ./crb update          updates this script, the image, and every project
 #   ./crb dashboard       adds the status dashboard and wires every box to it
+#   ./crb git [project]   shows main and every branch against origin
+#   ./crb git sync [project]  fast-forwards and pushes them (never forces)
 # Run it in the directory that holds compose.yaml.
 # A new box.yaml uses the newest release (latest). Override the tag to pin a
 # release or test an unreleased build: CRB_VERSION=edge ./crb add
@@ -45,6 +47,8 @@ usage() {
   echo "Usage: ./crb add [git-url]   Projekt hinzufügen"
   echo "       ./crb update          Skript, Image und Projekte aktualisieren"
   echo "       ./crb dashboard       Status-Dashboard anlegen und Boxen anbinden"
+  echo "       ./crb git [projekt]   Git-Stand zeigen: main und Branches gegen origin"
+  echo "       ./crb git sync [projekt]  mit origin abgleichen: pull und push"
 }
 
 # ask VAR "Question" [default]: empty input takes the default.
@@ -907,6 +911,284 @@ EOF
 }
 
 # =============================================================================
+# git
+# =============================================================================
+
+# gq: every Git call of `crb git`. No automatic housekeeping: it would prune
+# the records of worktrees created inside the container, whose recorded paths
+# (/workspace/...) do not exist on the host.
+gq() { git -c gc.auto=0 "$@" </dev/null; }
+
+# service_workspace FILE: source of the /workspace mount as written, or empty.
+service_workspace() {
+  sed -n -E 's|^[[:space:]]*-[[:space:]]*["'"'"']?([^"'"'"':]+):/workspace(:[a-z,]+)?["'"'"']?[[:space:]]*(#.*)?$|\1|p' "$1" | head -n 1
+}
+
+# git_line MARK BRANCH TEXT: one branch line, at most 40 columns for names up
+# to 20 characters.
+git_line() {
+  local mark=$1 n=$2 text=$3 pad
+  if [ ${#n} -gt 20 ]; then n="${n:0:19}…"; fi
+  pad=$((20 - ${#n}))
+  printf '%s %s%*s %s\n' "$mark" "$n" "$pad" "" "$text"
+}
+
+# git_note TEXT...: lines below a branch or project line, folded for a phone.
+git_note() { printf '%s\n' "$@" | head -n 4 | fold -s -w 36 | sed 's/^/    /'; }
+
+# git_project NAME SRC: fetches one project and prints (status) or applies
+# (sync) the action per local branch. Uses GIT_MODE, GIT_FETCH and the
+# GIT_N_* counters of cmd_git.
+git_project() {
+  local name=$1 src=${2//\$\$/\$} ws=""
+  case "$src" in
+    /*) ws=$src ;;
+    \~/*) ws="$HOME/${src#\~/}" ;;
+    */*|.*) ws="services/$src" ;;
+    *) echo "$name · Docker-Volume, kein Ordner"; return 0 ;;
+  esac
+  if ! ws=$(cd "$ws" 2>/dev/null && pwd); then echo "$name · Ordner fehlt"; git_note "$src"; return 0; fi
+  if [ -f "$ws/.git" ]; then echo "$name · nicht unterstützt"; git_note "Das Git-Verzeichnis liegt außerhalb des Workspace."; return 0; fi
+  if [ ! -d "$ws/.git" ]; then echo "$name · kein Git-Repository"; return 0; fi
+  if ! gq -C "$ws" remote get-url origin >/dev/null 2>&1; then echo "$name · kein Remote origin"; return 0; fi
+
+  local err=""
+  if [ "$GIT_FETCH" -eq 0 ]; then
+    echo "$name · ohne Fetch"
+  elif err=$(gq -C "$ws" fetch --prune --quiet origin 2>&1); then
+    echo "$name · Fetch ok"
+  else
+    GIT_N_FAIL=$((GIT_N_FAIL + 1))
+    echo "$name · Fetch fehlgeschlagen"
+    git_note "$err"
+    if [ "$GIT_MODE" = sync ]; then git_note "Nichts geändert."; return 0; fi
+    git_note "Stand evtl. veraltet:"
+  fi
+
+  # Checkouts as "branch<TAB>admin dir<TAB>host path"; the path is empty when
+  # the worktree cannot be reached from the host. Worktrees are addressed by
+  # their administrative directory, so records with container paths work and
+  # stay untouched.
+  local tab=$'\t' nl=$'\n' co="" first="" b="" d="" rec="" host=""
+  first=$(gq -C "$ws" symbolic-ref -q --short HEAD || true)
+  if [ -n "$first" ]; then co="$first$tab$ws/.git$tab$ws$nl"; fi
+  for d in "$ws"/.git/worktrees/*/; do
+    d=${d%/}
+    [ -f "$d/gitdir" ] || continue
+    b=$(gq --git-dir="$d" symbolic-ref -q --short HEAD || true)
+    [ -n "$b" ] || continue
+    rec=$(cat "$d/gitdir"); rec=${rec%/.git}
+    case "$rec" in
+      /workspace/*) host="$ws/${rec#/workspace/}" ;;
+      /*) host=$rec ;;
+      *) host=$(cd "$d" 2>/dev/null && cd "$rec" 2>/dev/null && pwd) || host="" ;;
+    esac
+    if [ -z "$host" ] || [ ! -d "$host" ]; then host=""; fi
+    co="$co$b$tab$d$tab$host$nl"
+  done
+
+  local def="" c=""
+  def=$(gq -C "$ws" symbolic-ref -q --short refs/remotes/origin/HEAD || true)
+  if [ -z "$def" ]; then
+    for c in origin/main origin/master; do
+      if gq -C "$ws" show-ref --verify -q "refs/remotes/$c"; then def=$c; break; fi
+    done
+  fi
+
+  # The branch checked out in the workspace first, the others by name.
+  # ":" cannot occur in a ref name.
+  local refs="" line=""
+  refs=$(gq -C "$ws" for-each-ref refs/heads --format='%(refname:short):%(upstream:remotename):%(upstream:short):%(upstream:track)')
+  refs=$(printf '%s\n' "$refs" | awk -F: -v f="$first" '$1 == f'; printf '%s\n' "$refs" | awk -F: -v f="$first" '$1 != f')
+
+  local re_a='ahead ([0-9]+)' re_b='behind ([0-9]+)'
+  local up_remote="" up="" track="" target="" state="" ahead=0 behind=0 counts=""
+  local row="" checked=0 admin="" path="" dirty=0 kind="" text="" star="" old="" new=""
+  while IFS= read -r line <&3; do
+    [ -n "$line" ] || continue
+    IFS=: read -r b up_remote up track <<<"$line"
+
+    # State against the remote counterpart: the configured upstream on origin,
+    # else origin/<branch> when it exists.
+    target=""; state=ok; ahead=0; behind=0
+    if [ -n "$up" ] && [ "$up_remote" = origin ]; then
+      target=$up
+      if [ "$track" = "[gone]" ]; then
+        state=gone
+      else
+        if [[ "$track" =~ $re_a ]]; then ahead=${BASH_REMATCH[1]}; fi
+        if [[ "$track" =~ $re_b ]]; then behind=${BASH_REMATCH[1]}; fi
+      fi
+    elif gq -C "$ws" show-ref --verify -q "refs/remotes/origin/$b"; then
+      target="origin/$b"
+      counts=$(gq -C "$ws" rev-list --left-right --count "refs/heads/$b...refs/remotes/origin/$b")
+      ahead=${counts%%[[:space:]]*}; behind=${counts##*[[:space:]]}
+    else
+      state=none
+      if [ -n "$def" ]; then
+        ahead=$(gq -C "$ws" rev-list --count "refs/remotes/$def..refs/heads/$b")
+      else
+        ahead=$(gq -C "$ws" rev-list --count "refs/heads/$b")
+      fi
+    fi
+
+    row=$(printf '%s' "$co" | awk -F'\t' -v b="$b" '$1 == b { print; exit }')
+    checked=0; admin=""; path=""; dirty=0
+    if [ -n "$row" ]; then
+      checked=1
+      admin=$(printf '%s\n' "$row" | cut -f2); path=$(printf '%s\n' "$row" | cut -f3)
+      if [ -n "$path" ] && [ -n "$(gq --git-dir="$admin" --work-tree="$path" status --porcelain --untracked-files=no 2>/dev/null)" ]; then dirty=1; fi
+    fi
+
+    if [ "$state" = gone ]; then kind=gone
+    elif [ "$state" = none ]; then if [ "$ahead" -gt 0 ]; then kind=pushnew; else kind=empty; fi
+    elif [ "$ahead" -gt 0 ] && [ "$behind" -gt 0 ]; then kind=diverged
+    elif [ "$ahead" -gt 0 ]; then kind=push
+    elif [ "$behind" -eq 0 ]; then kind=equal
+    elif [ "$checked" -eq 1 ] && [ -z "$path" ]; then kind=unreachable
+    elif [ "$dirty" -eq 1 ]; then kind=blocked
+    else kind=ff
+    fi
+
+    star=""
+    if [ "$dirty" -eq 1 ] && [ "$kind" != blocked ] && [ "$kind" != diverged ]; then star=" *"; GIT_STAR=1; fi
+    case "$kind" in
+      gone) text="Upstream fehlt" ;;
+      pushnew) if [ "$ahead" -eq 1 ]; then text="neu, 1 Commit"; else text="neu, $ahead Commits"; fi ;;
+      empty) text="neu, leer" ;;
+      equal) text="aktuell" ;;
+      diverged) text="$ahead vor $behind hinter" ;;
+      push) text="$ahead vor" ;;
+      *) text="$behind hinter" ;;
+    esac
+
+    case "$kind" in
+      equal|empty) git_line "=" "$b" "$text$star" ;;
+      gone) GIT_N_OPEN=$((GIT_N_OPEN + 1)); git_line "!" "$b" "$text$star"; git_note "auf origin gelöscht" ;;
+      diverged)
+        GIT_N_OPEN=$((GIT_N_OPEN + 1)); git_line "!" "$b" "$text"
+        if [ "$dirty" -eq 1 ]; then git_note "divergiert, lokale Änderungen"; else git_note "divergiert, bitte selbst lösen"; fi ;;
+      blocked) GIT_N_OPEN=$((GIT_N_OPEN + 1)); git_line "!" "$b" "$text"; git_note "lokale Änderungen, kein Pull" ;;
+      unreachable) GIT_N_OPEN=$((GIT_N_OPEN + 1)); git_line "!" "$b" "$text"; git_note "Checkout vom Host nicht erreichbar" ;;
+      ff)
+        if [ "$GIT_MODE" != sync ]; then
+          GIT_N_PLAN=$((GIT_N_PLAN + 1)); git_line "↓" "$b" "$text"
+        elif [ "$checked" -eq 1 ]; then
+          # Checked out: move the branch and its files, fast-forward only.
+          if err=$(gq --git-dir="$admin" --work-tree="$path" merge --ff-only --quiet "refs/remotes/$target" 2>&1); then
+            GIT_N_FF=$((GIT_N_FF + 1)); git_line "✓" "$b" "$behind geholt"
+          else
+            GIT_N_FAIL=$((GIT_N_FAIL + 1)); git_line "✗" "$b" "$text"; git_note "$err"
+          fi
+        else
+          # Not checked out: move the ref, guarded by its old value.
+          old=$(gq -C "$ws" rev-parse "refs/heads/$b"); new=$(gq -C "$ws" rev-parse "refs/remotes/$target")
+          if err=$(gq -C "$ws" update-ref -m "crb git sync: fast-forward" "refs/heads/$b" "$new" "$old" 2>&1); then
+            GIT_N_FF=$((GIT_N_FF + 1)); git_line "✓" "$b" "$behind geholt"
+          else
+            GIT_N_FAIL=$((GIT_N_FAIL + 1)); git_line "✗" "$b" "$text"; git_note "$err"
+          fi
+        fi ;;
+      push|pushnew)
+        if [ "$GIT_MODE" != sync ]; then
+          GIT_N_PLAN=$((GIT_N_PLAN + 1)); git_line "↑" "$b" "$text$star"
+        else
+          if [ "$kind" = pushnew ]; then
+            if err=$(gq -C "$ws" push --quiet -u origin "refs/heads/$b:refs/heads/$b" 2>&1); then err=""; else err=${err:-push fehlgeschlagen}; fi
+            text="neu, $ahead gepusht"
+          else
+            if err=$(gq -C "$ws" push --quiet origin "refs/heads/$b:refs/heads/${target#origin/}" 2>&1); then err=""; else err=${err:-push fehlgeschlagen}; fi
+            text="$ahead gepusht"
+          fi
+          if [ -z "$err" ]; then
+            GIT_N_PUSH=$((GIT_N_PUSH + 1)); git_line "✓" "$b" "$text$star"
+          else
+            GIT_N_FAIL=$((GIT_N_FAIL + 1)); git_line "✗" "$b" "$ahead vor"; git_note "$err"
+          fi
+        fi ;;
+    esac
+  done 3<<REFS
+$refs
+REFS
+  return 0
+}
+
+cmd_git() {
+  GIT_MODE=status; GIT_FETCH=1
+  GIT_N_PUSH=0; GIT_N_FF=0; GIT_N_OPEN=0; GIT_N_FAIL=0; GIT_N_PLAN=0; GIT_STAR=0
+  if [ "${1-}" = sync ]; then GIT_MODE=sync; shift; fi
+  local -a want=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-fetch) GIT_FETCH=0 ;;
+      -*) die "Unbekannte Option: $1" ;;
+      *) want+=("$1") ;;
+    esac
+    shift
+  done
+  if [ "$GIT_MODE" = sync ] && [ "$GIT_FETCH" -eq 0 ]; then die "--no-fetch gibt es nur für die Übersicht (./crb git --no-fetch)."; fi
+
+  # No Docker needed here, so not check_host.
+  if [ "$(id -u)" -eq 0 ]; then die "Bitte nicht als root ausführen: Dateien im Repository gehören sonst root."; fi
+  command -v git >/dev/null 2>&1 || die "git ist nicht installiert."
+  [ -f compose.yaml ] || die "Hier liegt keine compose.yaml. Bitte im Ordner der Installation ausführen."
+  if [ ! -f box.yaml ] || [ ! -d services ]; then
+    die "crb git braucht das services/-Layout (box.yaml und services/<name>.yaml). Diese Installation führt ihre Services in compose.yaml."
+  fi
+
+  # Parallel arrays (bash 3.2 has no associative arrays).
+  local -a names=() srcs=()
+  local f n src i w found
+  for f in services/*.yaml; do
+    [ -f "$f" ] || continue
+    n=$(basename "$f" .yaml)
+    [ "$n" = crb-dashboard ] && continue
+    src=$(service_workspace "$f")
+    [ -n "$src" ] || continue
+    names+=("$n"); srcs+=("$src")
+  done
+  [ ${#names[@]} -gt 0 ] || die "Keine Projekte in services/ gefunden."
+  if [ ${#want[@]} -gt 0 ]; then
+    for w in "${want[@]}"; do
+      found=0
+      for n in "${names[@]}"; do if [ "$n" = "$w" ]; then found=1; fi; done
+      [ "$found" -eq 1 ] || die "Unbekanntes Projekt: $w (vorhanden: ${names[*]})"
+    done
+  fi
+
+  # Never wait for input: a remote that needs a passphrase, a password or a
+  # host-key confirmation counts as a failed fetch or push.
+  export GIT_TERMINAL_PROMPT=0
+  export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}"
+  # The overview must not write to a repository, not even the index.
+  export GIT_OPTIONAL_LOCKS=0
+
+  local printed=0
+  for i in "${!names[@]}"; do
+    if [ ${#want[@]} -gt 0 ]; then
+      found=0
+      for w in "${want[@]}"; do if [ "$w" = "${names[$i]}" ]; then found=1; fi; done
+      [ "$found" -eq 1 ] || continue
+    fi
+    if [ "$printed" -eq 1 ]; then echo ""; fi
+    printed=1
+    git_project "${names[$i]}" "${srcs[$i]}"
+  done
+
+  echo ""
+  if [ "$GIT_MODE" = sync ]; then
+    local sum="$GIT_N_PUSH gepusht · $GIT_N_FF geholt · $GIT_N_OPEN offen"
+    if [ "$GIT_N_FAIL" -gt 0 ]; then sum="$sum · $GIT_N_FAIL Fehler"; fi
+    echo "$sum"
+  else
+    echo "↓ fast-forward  ↑ push  ! offen"
+    if [ "$GIT_N_PLAN" -gt 0 ]; then echo "Ausführen: ./crb git sync"; fi
+  fi
+  if [ "$GIT_STAR" -eq 1 ]; then echo "* lokale Änderungen im Checkout"; fi
+  if [ "$GIT_N_FAIL" -gt 0 ]; then exit 1; fi
+}
+
+# =============================================================================
 
 main() {
   local cmd=${1-}
@@ -915,6 +1197,7 @@ main() {
     add) cmd_add "$@" ;;
     update) cmd_update "$@" ;;
     dashboard) cmd_dashboard "$@" ;;
+    git) cmd_git "$@" ;;
     *) usage >&2; exit 64 ;;
   esac
 }

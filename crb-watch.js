@@ -7,11 +7,13 @@
 //   crb-watch.js --emit k=v [k=v...]   send one event (phase, heartbeat)
 //   crb-watch.js --dry-run FILE...     print the events of transcripts, no network
 //   crb-watch.js --hook                Claude Code hook: reads the hook JSON on stdin
+//   crb-watch.js --git [DIR]           print the git event of DIR (default: the workspace), no network
 //   crb-watch.js --version
 //
 // Environment: CRB_STATUS_URL (off when empty), CRB_STATUS_TOKEN, CRB_NAME,
 // CLAUDE_CONFIG_DIR, CRB_STATE (phase file), CRB_SPAWN_EFFECTIVE,
-// CRB_IMAGE_VERSION, CRB_SPOOL (default /tmp/crb-spool.jsonl).
+// CRB_IMAGE_VERSION, CRB_SPOOL (default /tmp/crb-spool.jsonl), CRB_WORKSPACE
+// (default /workspace).
 // State (run id, sequence counter, read offsets) lives in
 // $CLAUDE_CONFIG_DIR/.crb-watch.json, so it survives a container recreation.
 'use strict';
@@ -35,6 +37,7 @@ const HEARTBEAT_MS = 30000;
 const WAITING_MS = 10000;
 const IDLE_END_MS = 60 * 60 * 1000;
 const STATE_SAVE_MS = 5000;
+const GIT_TIMEOUT_MS = 5000;
 
 const env = process.env;
 const cfg = {
@@ -47,6 +50,7 @@ const cfg = {
   emitSeqFile: env.CRB_EMIT_SEQ || '/tmp/crb-emit-seq',
   spawn: env.CRB_SPAWN_EFFECTIVE || env.CRB_SPAWN || '',
   image: env.CRB_IMAGE_VERSION || 'unknown',
+  workspace: env.CRB_WORKSPACE || '/workspace',
 };
 
 function log(msg) { process.stderr.write(`crb-watch: ${msg}\n`); }
@@ -182,7 +186,8 @@ function post(events) {
 
 function spoolAppend(events) {
   try {
-    const lines = events.filter((e) => e.type !== 'heartbeat').map((e) => JSON.stringify(e));
+    // Heartbeats and git state describe the present; an old one is worth nothing.
+    const lines = events.filter((e) => e.type !== 'heartbeat' && e.type !== 'git').map((e) => JSON.stringify(e));
     if (!lines.length) return;
     let existing = [];
     try { existing = fs.readFileSync(cfg.spoolFile, 'utf8').split('\n').filter(Boolean); } catch { /* none */ }
@@ -417,6 +422,89 @@ function scan(initial) {
   }
 }
 
+// --- git state -------------------------------------------------------------------
+// Read-only, and never over the network: the remote state comes from the refs
+// the last fetch on the host left in the repository.
+
+function git(dir, args) {
+  try {
+    const r = spawnSync('git', ['-C', dir, '-c', 'gc.auto=0', ...args], {
+      encoding: 'utf8', timeout: GIT_TIMEOUT_MS,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
+    });
+    return r.status === 0 ? r.stdout.replace(/\n+$/, '') : null;
+  } catch { return null; }
+}
+
+function count(s) { const n = parseInt(s, 10); return Number.isFinite(n) ? n : 0; }
+
+// The default branch as a ref: origin/HEAD, else main or master.
+function defaultBranch(ws) {
+  const head = git(ws, ['symbolic-ref', '-q', '--short', 'refs/remotes/origin/HEAD']);
+  if (head) return `refs/remotes/${head}`;
+  for (const ref of ['refs/remotes/origin/main', 'refs/remotes/origin/master', 'refs/heads/main', 'refs/heads/master']) {
+    if (git(ws, ['show-ref', '--verify', '-q', ref]) !== null) return ref;
+  }
+  return null;
+}
+
+// One checkout: state against the default branch and against its remote
+// counterpart (the configured upstream on origin, else origin/<branch>).
+function worktreeState(dir, def) {
+  const w = { path: dir, branch: null, ahead: 0, dirty: 0, added: 0, removed: 0, subject: null, committed: null,
+    remote: 'none', upstream: null, unpushed: null, behind: null };
+  const st = git(dir, ['status', '--porcelain=v2', '--branch']);
+  if (st === null) return null;
+  let upstream = null; let ab = null;
+  for (const line of st.split('\n')) {
+    if (line.startsWith('# branch.head ')) { const h = line.slice(14); w.branch = h === '(detached)' ? null : h; }
+    else if (line.startsWith('# branch.upstream ')) upstream = line.slice(18);
+    else if (line.startsWith('# branch.ab ')) ab = line.match(/\+(\d+) -(\d+)/);
+    else if (line && !line.startsWith('#')) w.dirty += 1;
+  }
+  if (upstream && upstream.startsWith('origin/')) {
+    if (ab) { w.remote = 'ok'; w.upstream = upstream; w.unpushed = count(ab[1]); w.behind = count(ab[2]); }
+    else w.remote = 'gone';
+  } else if (w.branch && git(dir, ['show-ref', '--verify', '-q', `refs/remotes/origin/${w.branch}`]) !== null) {
+    const lr = git(dir, ['rev-list', '--left-right', '--count', `HEAD...refs/remotes/origin/${w.branch}`]);
+    if (lr !== null) {
+      const [a, b] = lr.split(/\s+/);
+      w.remote = 'ok'; w.upstream = `origin/${w.branch}`; w.unpushed = count(a); w.behind = count(b);
+    }
+  }
+  if (def) {
+    w.ahead = count(git(dir, ['rev-list', '--count', `${def}..HEAD`]));
+    const stat = git(dir, ['diff', '--shortstat', `${def}...HEAD`]) || '';
+    const ins = stat.match(/(\d+) insertion/); const del = stat.match(/(\d+) deletion/);
+    w.added = ins ? count(ins[1]) : 0; w.removed = del ? count(del[1]) : 0;
+  }
+  const last = git(dir, ['log', '-1', '--format=%s%x00%cI']);
+  if (last) { const [subject, committed] = last.split('\0'); w.subject = truncate(subject, SUMMARY_LIMIT); w.committed = committed || null; }
+  return w;
+}
+
+// The git event for the workspace, or null when it is not a repository.
+function gitEvent(ws) {
+  if (!fs.existsSync(path.join(ws, '.git'))) return null;
+  const list = git(ws, ['worktree', 'list', '--porcelain']);
+  if (list === null) return null;
+  const def = defaultBranch(ws);
+  const worktrees = [];
+  for (const line of list.split('\n')) {
+    if (!line.startsWith('worktree ')) continue;
+    const dir = line.slice(9);
+    if (!fs.existsSync(dir)) continue; // a stale record
+    const w = worktreeState(dir, def);
+    if (w) worktrees.push(w);
+  }
+  let fetchedAt = null;
+  const common = git(ws, ['rev-parse', '--git-common-dir']);
+  if (common) {
+    try { fetchedAt = fs.statSync(path.join(path.resolve(ws, common), 'FETCH_HEAD')).mtime.toISOString(); } catch { /* never fetched */ }
+  }
+  return { type: 'git', worktrees, fetched_at: fetchedAt };
+}
+
 // --- periodic checks -----------------------------------------------------------
 
 function checkWaiting() {
@@ -440,6 +528,8 @@ function checkWaiting() {
 function heartbeat() {
   emit({ type: 'heartbeat', phase: readPhase(), uptime_s: containerUptimeS(), image: cfg.image,
     claude_version: claudeVersion(), spawn: cfg.spawn || null });
+  const g = gitEvent(cfg.workspace);
+  if (g) emit(g);
   flush();
 }
 
@@ -459,6 +549,12 @@ function parseKv(args) {
 async function main() {
   const args = process.argv.slice(2);
   if (args[0] === '--version') { console.log(VERSION); return; }
+
+  if (args[0] === '--git') {
+    const g = gitEvent(args[1] || cfg.workspace);
+    if (g) console.log(JSON.stringify(g));
+    return;
+  }
 
   if (args[0] === '--dry-run') {
     dryRun = true;

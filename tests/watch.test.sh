@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016  # checks are single-quoted on purpose and run through eval
 # Tests for crb-watch.js: parsing (dry run), sender with spool and backoff,
-# waiting heuristic, backfill. Needs only node; no Docker.
+# waiting heuristic, backfill, git state. Needs only node and git; no Docker.
 # Usage: tests/watch.test.sh
 set -uo pipefail
 
@@ -38,6 +38,44 @@ check "bad line skipped, box and seq present" 'echo "$DRY" | head -1 | grep -q "
 printf '{"type":"assistant","sessionId":"s2","timestamp":"2026-11-06T12:00:00Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"%s"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n' "$(head -c 5000 /dev/zero | tr '\0' x)" >"$WORK/long.jsonl"
 check "long reply truncated" '[ "$(node "$WATCH" --dry-run "$WORK/long.jsonl" | grep "\"type\":\"reply\"" | node -e "let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>console.log(JSON.parse(s).text.length))")" -eq $((4000 + 13)) ]'
 
+echo "Git event"
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com GIT_CONFIG_GLOBAL=/dev/null
+G="$WORK/git"; GW="$G/ws"; mkdir -p "$G" "$WORK/plain"
+git init -q -b main "$G/seed"; echo one >"$G/seed/f.txt"; git -C "$G/seed" add f.txt; git -C "$G/seed" commit -q -m init
+git clone -q --bare "$G/seed" "$G/origin.git"; git clone -q "$G/origin.git" "$GW"; git clone -q "$G/origin.git" "$G/other"
+for b in feat merged; do git -C "$GW" branch -q "$b"; git -C "$GW" push -q -u origin "$b" >/dev/null 2>&1; done
+git -C "$GW" worktree add -q "$GW/.wt/x" feat
+git -C "$GW" worktree add -q "$GW/.wt/gone" merged
+git -C "$GW" worktree add -q -b fresh "$GW/.wt/new"
+git -C "$GW/.wt/x" commit -q --allow-empty -m "First"
+echo two >>"$GW/.wt/x/f.txt"; git -C "$GW/.wt/x" commit -q -a -m "Add nav"
+echo three >>"$GW/.wt/x/f.txt"
+git -C "$GW/.wt/new" commit -q --allow-empty -m "Fresh work"
+# gitf BRANCH FIELD: one field of a checkout in the event $GEV; fetched_at is per event.
+gitf() { node -e 'const e=JSON.parse(process.argv[1]);const w=e.worktrees.find((x)=>x.branch===process.argv[2])||{};console.log(JSON.stringify(process.argv[3]==="fetched_at"?e.fetched_at:w[process.argv[3]]))' "$GEV" "$1" "$2"; }
+GEV=$(node "$WATCH" --git "$GW")
+check "all checkouts listed, workspace first" '[ "$(node -e "console.log(JSON.parse(process.argv[1]).worktrees.map((w)=>w.branch).join(\" \"))" "$GEV")" = "main merged fresh feat" ] && [ "$(gitf main path)" = "\"$(cd "$GW" && pwd -P)\"" ]'
+check "worktree with commits: ahead, dirty, lines, subject" '[ "$(gitf feat ahead)" = 2 ] && [ "$(gitf feat dirty)" = 1 ] && [ "$(gitf feat added)" = 1 ] && [ "$(gitf feat subject)" = "\"Add nav\"" ] && gitf feat committed | grep -q "^\"20"'
+check "unpushed commits against the upstream" '[ "$(gitf feat remote)" = "\"ok\"" ] && [ "$(gitf feat upstream)" = "\"origin/feat\"" ] && [ "$(gitf feat unpushed)" = 2 ] && [ "$(gitf feat behind)" = 0 ]'
+check "branch not on origin: none and nulls" '[ "$(gitf fresh remote)" = "\"none\"" ] && [ "$(gitf fresh upstream)" = null ] && [ "$(gitf fresh unpushed)" = null ] && [ "$(gitf fresh behind)" = null ] && [ "$(gitf fresh ahead)" = 1 ]'
+check "never fetched" '[ "$(gitf main fetched_at)" = null ] && [ "$(gitf main behind)" = 0 ]'
+# The host fetches; the box only reads what that left behind.
+for i in 1 2 3; do git -C "$G/other" commit -q --allow-empty -m "remote $i"; done
+git -C "$G/other" push -q origin main; git -C "$G/other" push -q origin --delete merged
+git -C "$GW" fetch -q --prune origin
+GEV=$(node "$WATCH" --git "$GW")
+check "after a host fetch: behind and fetch time" '[ "$(gitf main behind)" = 3 ] && [ "$(gitf main unpushed)" = 0 ] && gitf main fetched_at | grep -q "^\"20"'
+check "upstream deleted on origin: gone" '[ "$(gitf merged remote)" = "\"gone\"" ] && [ "$(gitf merged unpushed)" = null ]'
+git -C "$GW" branch -q --unset-upstream feat
+GEV=$(node "$WATCH" --git "$GW")
+check "no upstream configured: origin/<branch> is the counterpart" '[ "$(gitf feat remote)" = "\"ok\"" ] && [ "$(gitf feat upstream)" = "\"origin/feat\"" ] && [ "$(gitf feat unpushed)" = 2 ]'
+mv "$G/origin.git" "$G/origin.away"
+before=$(git -C "$GW" for-each-ref; git -C "$GW" status --porcelain)
+check "works without the remote, same numbers" '[ "$(node "$WATCH" --git "$GW")" = "$GEV" ]'
+check "read-only" '[ "$(git -C "$GW" for-each-ref; git -C "$GW" status --porcelain)" = "$before" ]'
+check "plain directory: no git event" '[ -z "$(node "$WATCH" --git "$WORK/plain")" ]'
+unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+
 echo "Emit and heartbeat through the receiver"
 node "$RECV" "$PORT" "$OUT" secret 2>/dev/null & pids+=($!)
 sleep 0.5
@@ -63,11 +101,13 @@ check "other notification -> logged only" '[ ! -s "$OUT" ] && grep -q idle_promp
 echo "Daemon: live events, waiting heuristic, spool"
 T="$CFG/projects/-workspace/live.jsonl"
 : >"$OUT"; rm -f "$WORK/spool.jsonl"
+export CRB_WORKSPACE="$GW"
 node "$WATCH" 2>"$WORK/watch.log" & pids+=($!)
 sleep 1
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 printf '{"type":"user","sessionId":"live","cwd":"/workspace","timestamp":"%s","message":{"role":"user","content":"hallo"}}\n' "$(now)" >>"$T"
 printf '{"type":"assistant","sessionId":"live","timestamp":"%s","message":{"role":"assistant","model":"m","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"sleep 30"}}],"usage":{"input_tokens":1,"output_tokens":1}}}\n' "$(now)" >>"$T"
+check "git event next to the heartbeat" 'waitfor "\"type\":\"git\"" 10 && events | grep "\"type\":\"git\"" | grep -q "\"branch\":\"feat\"" && events | grep "\"type\":\"git\"" | grep -q "\"fetched_at\":\"20"'
 check "prompt and tool arrive, with run id" 'waitfor "\"type\":\"tool\"" 10 && events | grep -q "\"type\":\"prompt\"" && events | grep -q "\"text\":\"hallo\"" && events | grep "\"type\":\"prompt\"" | grep -qE "\"run\":\"[0-9a-f]{8}\""'
 check "waiting after ~10s" 'waitfor "\"type\":\"waiting\"" 15 && events | grep "\"type\":\"waiting\"" | grep -q "\"summary\":\"sleep 30\""'
 printf '{"type":"user","sessionId":"live","timestamp":"%s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"done"}]}}\n' "$(now)" >>"$T"
@@ -94,7 +134,7 @@ for i in $(seq 1 700); do
 done >>"$T"
 sleep 12
 check "bounded to 500, newest kept, loss logged once" '[ "$(grep -c . "$WORK/spool.jsonl")" -eq 500 ] && grep -q "bulk 700" "$WORK/spool.jsonl" && ! grep -q "bulk 001" "$WORK/spool.jsonl" && [ "$(grep -c "spool full" "$WORK/watch2.log")" -eq 1 ]'
-check "no heartbeat in spool" '! grep -q heartbeat "$WORK/spool.jsonl"'
+check "no heartbeat and no git state in spool" '! grep -q heartbeat "$WORK/spool.jsonl" && ! grep -q "\"type\":\"git\"" "$WORK/spool.jsonl"'
 kill "${pids[2]}" 2>/dev/null; sleep 0.5
 rm -f "$OUT.pause" "$WORK/spool.jsonl"
 
@@ -111,8 +151,10 @@ kill "${pids[3]}" 2>/dev/null; sleep 0.5
 
 echo "Fresh state: new run id, existing transcripts summarized only"
 : >"$OUT"; rm -f "$CFG/.crb-watch.json"
+export CRB_WORKSPACE="$WORK/plain"
 node "$WATCH" 2>>"$WORK/watch.log" & pids+=($!)
 check "summaries only, new run" 'waitfor "\"session\":\"live\"" 10 && ! events | grep -q "\"text\":" && events | grep "\"session\":\"live\"" | grep -q "\"backfill\":true" && ! events | grep -q "\"run\":\"$RUN1\""'
+check "workspace is not a repository: heartbeat without a git event" 'waitfor "\"type\":\"heartbeat\"" 10 && ! events | grep -q "\"type\":\"git\""'
 kill "${pids[4]}" 2>/dev/null
 
 echo ""

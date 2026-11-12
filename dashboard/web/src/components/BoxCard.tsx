@@ -1,7 +1,7 @@
 import { useState, type KeyboardEvent, type MouseEvent } from 'react';
 import { ChevronRight, Copy, ExternalLink, GitBranch, Hourglass, Check } from 'lucide-react';
 import type { BoxCard as BoxCardModel, SessionCard } from '@shared/types';
-import { modelLabel } from '@shared/model.js';
+import { gitStateParts, modelLabel } from '@shared/model.js';
 import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -130,6 +130,7 @@ export function StatusBox({ status, className }: { status: Status; className?: s
 export function SessionBlock({ s, now }: { s: SessionCard | null; now: number }) {
   const ratio = s && s.context_window ? Math.min(100, Math.round((s.context / s.context_window) * 100)) : 0;
   const muted = 'text-muted-foreground';
+  const gitState = gitStateParts(s?.git).join(' · ');
   return (
     <div className="flex flex-col gap-1.5 text-xs">
       <div className={cn('flex items-baseline justify-between gap-2 leading-4', muted)} title={s && s.label !== s.id ? s.label : undefined}>
@@ -147,13 +148,9 @@ export function SessionBlock({ s, now }: { s: SessionCard | null; now: number })
       </div>
       <div className={cn('flex min-w-0 items-center gap-1.5 leading-4 whitespace-nowrap', muted)}>
         <GitBranch className="size-3 shrink-0" />
-        <span className="min-w-0 truncate">{s?.git?.branch ?? s?.branch ?? DASH}</span>
-        {s?.git && (
-          <span className="shrink-0">
-            {s.git.ahead > 0 && <>· {s.git.ahead} Commit{s.git.ahead === 1 ? '' : 's'} vor </>}
-            {s.git.dirty > 0 && <>· {s.git.dirty} geändert</>}
-          </span>
-        )}
+        {/* The branch name gives way first, the state only when even that is not enough. */}
+        <span className={cn('truncate', gitState ? 'min-w-14' : 'min-w-0')} style={{ flexShrink: 1000 }}>{s?.git?.branch ?? s?.branch ?? DASH}</span>
+        {gitState && <span className="git-state min-w-0 truncate">· {gitState}</span>}
         <span className="ml-auto shrink-0">
           {s && (s.lines_added != null || s.lines_removed != null)
             ? <><span className="text-success">+{s.lines_added ?? 0}</span> / <span className="text-destructive">-{s.lines_removed ?? 0}</span></>

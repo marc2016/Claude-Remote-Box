@@ -189,7 +189,7 @@ Phone mode is a file `CLAUDE.md` in the project's config directory, `./my-projec
 
 ## Status dashboard
 
-One page, made for the phone, with one card per box: status and phase, permission mode, the active session with model, context size and token totals, what Claude is doing right now, and, most prominent, whether it waits for your approval. A box without setup shows the `setup` command instead. Tap a card for the session's timeline: your prompts, Claude's replies, the tool calls between them. Light and dark follow the device.
+One page, made for the phone, with one card per box: status and phase, permission mode, the active session with model, context size and token totals, what Claude is doing right now, and, most prominent, whether it waits for your approval. A box without setup shows the `setup` command instead. Tap a card for the session's timeline: your prompts, Claude's replies, the tool calls between them. The card's Git row shows the session's branch with its push state ("2 nicht gepusht", "3 hinter", "nicht auf origin", "auf origin gelöscht", "gepusht") and the number of changed files; the detail view lists every checkout of the box that way, with the age of the last fetch. The dashboard only shows this; pulling and pushing is `./crb git sync` on the host, see "Git workflow". Light and dark follow the device.
 
 ```sh
 ./crb dashboard        # adds the service and wires every box to it
@@ -208,7 +208,7 @@ Tap a card to open it: the card grows into a detail view with its information on
 
 A box can report what it does to an HTTP endpoint you run, normally the status dashboard above. Set `CRB_STATUS_URL` and `CRB_STATUS_TOKEN` on the service; without the URL nothing runs and nothing is sent.
 
-What is sent, as JSON arrays of events with the box name, a timestamp, and a sequence number: `phase` on every change (`waiting-config`, `waiting-setup`, `running`, `restarting`), a `heartbeat` every 30 s with phase, uptime, image and Claude Code version, and spawn mode, and per session `session_start`, `prompt`, `reply`, `tool` (tool name plus the command, path, or pattern), `tool_result` (ok or error), `waiting` when a tool call has had no result for 10 s (a permission prompt or a long-running command, the box cannot tell), `resumed`, `summary` after each reply (model, token totals, current context size, turns, tool calls, and cost and changed lines when the transcript has them), and `session_end` after an hour without activity.
+What is sent, as JSON arrays of events with the box name, a timestamp, and a sequence number: `phase` on every change (`waiting-config`, `waiting-setup`, `running`, `restarting`), a `heartbeat` every 30 s with phase, uptime, image and Claude Code version, and spawn mode, and per session `session_start`, `prompt`, `reply`, `tool` (tool name plus the command, path, or pattern), `tool_result` (ok or error), `waiting` when a tool call has had no result for 10 s (a permission prompt or a long-running command, the box cannot tell), `resumed`, `summary` after each reply (model, token totals, current context size, turns, tool calls, and cost and changed lines when the transcript has them), `session_end` after an hour without activity, and, when `/workspace` is a Git repository, `git` with every heartbeat: per checkout (the workspace and every worktree) `path`, `branch`, `ahead` (commits ahead of the default branch), `dirty` (changed files), `added` and `removed` (lines against the default branch), `subject` and `committed` of the last commit, `remote` (`ok`, `none`, or `gone`), `upstream`, `unpushed`, and `behind`, plus `fetched_at`, the time of the repository's last fetch. The watcher reads this from the repository and never contacts a remote.
 
 The data comes from a small watcher process in the container that reads the session transcripts Claude Code writes in the config directory. It only reads; sessions are not slowed down. Prompts and replies are truncated to 4000 characters. Sends time out after 2 s; while the endpoint is unreachable, events are kept in a spool (newest 500) and delivered in order afterwards.
 
@@ -273,9 +273,59 @@ To release, run `./release.sh` on a clean `main`: it runs the tests, bumps the v
 
 ## Git workflow
 
-Claude can commit inside `/workspace`. The container holds no push credentials, and we recommend keeping it that way: review the work and push from the host.
+Claude can commit inside `/workspace`. The container holds no push credentials, and we recommend keeping it that way: pulling and pushing happens on the host, with your own Git credentials.
 
-In `worktree` mode, sessions started from the app work in git worktrees inside your project. They are visible on the host with `git worktree list`. Clean them up with `git worktree remove <path>` or `git worktree prune`.
+```sh
+./crb git                  # fetch every project and show where each branch stands
+./crb git sync             # fetch, then fast-forward and push
+./crb git sync my-project  # only one project
+```
+
+`./crb git` changes nothing except the fetch. It lists `main` and every local branch against `origin`:
+
+```text
+my-project · Fetch ok
+↓ main                 3 hinter
+↑ calm-clock           neu, 1 Commit
+↑ feature/nav          2 vor *
+! fix/login            1 vor 2 hinter
+    divergiert, bitte selbst lösen
+
+↓ fast-forward  ↑ push  ! offen
+Ausführen: ./crb git sync
+* lokale Änderungen im Checkout
+```
+
+`./crb git sync` then decides per branch:
+
+| Branch against `origin` | What `sync` does |
+| --- | --- |
+| only behind | fast-forwards it, including the files of the checkout that has it checked out |
+| only ahead | pushes it |
+| not on `origin` yet, with commits | pushes it and sets the upstream |
+| not on `origin` yet, without commits | nothing |
+| ahead and behind | nothing; it tells you, and you merge or rebase yourself |
+| deleted on `origin` (for example after a merged pull request) | nothing; it is not pushed again |
+| behind, but the checkout has modified tracked files | nothing; commit or discard the changes first |
+
+It never forces a push, never merges or rebases, never deletes a branch or a worktree, and never creates local branches for branches that exist only on `origin`. A branch that cannot be handled does not stop the others. The exit code is non-zero only when a fetch, a push, or a fast-forward failed.
+
+Two things to know before you make it a habit:
+
+- **`sync` pushes without a review step.** Every branch with commits goes to `origin`, including `main` if Claude committed there. If you want to review first, look at `./crb git` and push by hand, or protect `main` on the remote: a rejected push is reported and nothing is forced.
+- **A fast-forward changes files under a running session.** It only happens when the checkout has no modified tracked files, so no work is lost, but Claude may then see newer files than it read.
+
+**From the phone.** Both commands run without asking anything, so an iOS shortcut with the action "Run script over SSH" and the script `cd ~/claude-remote-box && ./crb git sync` is a sync button. A shortcut has no SSH agent: the host needs a key for the Git remote that works without a passphrase prompt, for example a deploy key. If the remote would ask for a passphrase, a password, or a host-key confirmation, the fetch fails instead of waiting.
+
+**Keeping the dashboard current.** The boxes never contact `origin`; the dashboard's "hinter" counts are as fresh as the last fetch on the host. A cron line that runs the read-only overview keeps them current without pushing anything:
+
+```text
+*/15 * * * * cd ~/claude-remote-box && ./crb git >/dev/null 2>&1
+```
+
+`./crb git --no-fetch` shows the stored state without contacting `origin`. Projects need the `services/` layout and a remote named `origin`; other remotes are ignored.
+
+In `worktree` mode, sessions started from the app work in git worktrees inside your project, and `crb git` handles their branches like any other. Git records a worktree with the path it has where it was created, which is the path inside the container. Clean worktrees up from inside the container, where those paths are valid: `docker compose exec my-project git worktree remove <path>`.
 
 ## Security model
 
@@ -288,6 +338,7 @@ What the setup protects:
 
 What it does **not** protect (yet):
 
+- **`./crb git sync` publishes what Claude committed.** The push runs on the host with your credentials and without a review step, see "Git workflow". The containers still hold no push credentials.
 - **Outbound network is unrestricted.** The config storage holds your claude.ai login token. A successful prompt injection that gets a command approved could send it, or your code, somewhere else. Read permission prompts carefully. An optional egress allowlist is planned.
 - **`auto` mode moves that decision to a classifier.** With `--permission-mode auto`, Claude approves routine actions itself and asks you only for actions it judges risky. It is the mode with the least typing, and the container still limits the damage to the mounted project, but you no longer see every command before it runs, and the network and the token above are still exposed. Keep `default` if you want to see every command. `bypassPermissions` and `dontAsk` remove you from the loop entirely; the script does not offer them.
 - Anything you approve runs with full access to the mounted project.

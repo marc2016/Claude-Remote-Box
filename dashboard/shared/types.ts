@@ -46,6 +46,7 @@ export interface BoxEvent {
   lines_removed?: number;
   // git
   worktrees?: GitWorktree[];
+  fetched_at?: string | null;
   // session_end
   reason?: string;
   backfill?: boolean;
@@ -61,6 +62,17 @@ export interface GitWorktree {
   removed: number;
   subject: string | null;
   committed: string | null;
+  /** State against the remote counterpart; absent when the box is older than these fields. */
+  remote?: 'ok' | 'none' | 'gone';
+  upstream?: string | null;
+  unpushed?: number | null;
+  behind?: number | null;
+}
+
+/** Every checkout of a box and when its repository was last fetched. */
+export interface BoxGit {
+  fetched_at: string | null;
+  worktrees: GitWorktree[];
 }
 
 export type SessionActivity = 'ended' | 'waiting' | 'working' | 'idle';
@@ -104,6 +116,7 @@ export interface BoxCard {
   claude_version: string | null;
   spawn: string | null;
   permission_mode: string | null;
+  git: BoxGit | null;
   sessions: SessionCard[];
 }
 

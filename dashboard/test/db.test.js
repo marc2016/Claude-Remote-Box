@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../server/db.js';
 import { buildCards } from '../server/cards.js';
+import { gitStateParts, gitSummary } from '../shared/model.js';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -74,6 +75,57 @@ test('waiting-setup box without sessions, git worktree picked by branch', () => 
   const s = buildCards(store, T0).boxes[0].sessions[0];
   assert.equal(s.git.ahead, 2);
   assert.equal(s.git.subject, 'Add nav');
+});
+
+test('git state of a box: checkouts, fetch time, old shapes', () => {
+  const store = openDb(':memory:');
+  const fetched = iso(-300);
+  store.ingest([ev('heartbeat', { phase: 'running' }),
+    ev('session_start', { session: 's1', branch: 'feat', cwd: '/workspace/.wt/x' }),
+    ev('git', { fetched_at: fetched, worktrees: [
+      { path: '/workspace/.wt/x', branch: 'feat', ahead: 2, dirty: 1, remote: 'ok', upstream: 'origin/feat', unpushed: 2, behind: 0 },
+      { path: '/workspace', branch: 'main', ahead: 0, dirty: 0, remote: 'ok', upstream: 'origin/main', unpushed: 0, behind: 3 },
+      { path: '/workspace/.wt/y', branch: 'fresh', ahead: 1, dirty: 0, remote: 'none', upstream: null, unpushed: null, behind: null }] })], new Date(T0));
+  let b = buildCards(store, T0).boxes[0];
+  assert.equal(b.git.fetched_at, fetched);
+  assert.deepEqual(b.git.worktrees.map((w) => w.branch), ['main', 'feat', 'fresh'], 'workspace first, then as reported');
+  assert.equal(b.git.worktrees[0].behind, 3);
+  assert.equal(b.sessions[0].git.unpushed, 2);
+  assert.equal(b.sessions[0].git.remote, 'ok');
+
+  // An older box: no remote state, no fetch time.
+  store.ingest([ev('git', { worktrees: [{ path: '/workspace', branch: 'main', ahead: 0, dirty: 0 }, { path: '/workspace/.wt/x', branch: 'feat', ahead: 2, dirty: 1 }] })], new Date(T0));
+  b = buildCards(store, T0).boxes[0];
+  assert.equal(b.git.fetched_at, null);
+  assert.equal(b.git.worktrees.length, 2);
+  assert.equal(b.sessions[0].git.remote, undefined);
+  assert.equal(b.sessions[0].git.ahead, 2);
+
+  // A row stored before this change holds the bare array.
+  store.db.prepare('UPDATE boxes SET git_json = ? WHERE name = ?').run(JSON.stringify([{ path: '/workspace', branch: 'main', ahead: 1, dirty: 0 }]), 'b1');
+  b = buildCards(store, T0).boxes[0];
+  assert.equal(b.git.fetched_at, null);
+  assert.equal(b.git.worktrees[0].ahead, 1);
+
+  // No git event at all, or an empty one: no git state.
+  store.ingest([ev('git', { worktrees: [] })], new Date(T0));
+  assert.equal(buildCards(store, T0).boxes[0].git, null);
+});
+
+test('git state wording', () => {
+  const text = (w) => gitStateParts(w).join(' · ');
+  assert.equal(text({ ahead: 2, dirty: 1, remote: 'ok', unpushed: 2, behind: 0 }), '2 nicht gepusht · 1 geändert');
+  assert.equal(text({ ahead: 0, dirty: 0, remote: 'ok', unpushed: 0, behind: 3 }), '3 hinter');
+  assert.equal(text({ ahead: 1, dirty: 0, remote: 'ok', unpushed: 1, behind: 2 }), '1 nicht gepusht · 2 hinter');
+  assert.equal(text({ ahead: 4, dirty: 0, remote: 'ok', unpushed: 0, behind: 0 }), 'gepusht');
+  assert.equal(text({ ahead: 1, dirty: 0, remote: 'none', unpushed: null, behind: null }), 'nicht auf origin');
+  assert.equal(text({ ahead: 0, dirty: 0, remote: 'none', unpushed: null, behind: null }), '');
+  assert.equal(text({ ahead: 0, dirty: 2, remote: 'gone', unpushed: null, behind: null }), 'auf origin gelöscht · 2 geändert');
+  // Unknown remote state: what the row showed before.
+  assert.equal(text({ ahead: 2, dirty: 1 }), '2 Commits vor · 1 geändert');
+  assert.equal(text({ ahead: 1, dirty: 0 }), '1 Commit vor');
+  assert.equal(text(null), '');
+  assert.deepEqual(gitSummary([{ remote: 'ok', unpushed: 2, behind: 0 }, { remote: 'ok', unpushed: 0, behind: 3 }, { remote: 'none', ahead: 1 }, { remote: 'none', ahead: 0 }, { ahead: 5 }]), { unpushed: 2, behind: 1 });
 });
 
 test('pruning removes old events and keeps recent sessions', () => {
