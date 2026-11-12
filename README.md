@@ -276,12 +276,53 @@ To release, run `./release.sh` on a clean `main`: it runs the tests, bumps the v
 Claude can commit inside `/workspace`. The container holds no push credentials, and we recommend keeping it that way: pulling and pushing happens on the host, with your own Git credentials.
 
 ```sh
-./crb git                  # fetch every project and show where each branch stands
+./crb git                  # in a terminal: the menu
+./crb git --list           # fetch every project and show where each branch stands
 ./crb git sync             # fetch, then fast-forward and push
 ./crb git sync my-project  # only one project
 ```
 
-`./crb git` changes nothing except the fetch. It lists `main` and every local branch against `origin`:
+### The menu
+
+In a terminal, `./crb git` fetches every project and opens a menu: pick a project, then a branch, then what to do with it. Choices are numbers and single letters, so it works from a phone over SSH. `./crb git my-project` starts at that project's branches.
+
+```text
+Projekte
+ 1 auspex         ↑1 !1
+ 2 flashagenda    ↑1
+ 3 janus-note-vs  ↓2
+ 4 kuchometer     aktuell
+ ↑ pushen  ↓ holen  ! offen
+ a alle synchronisieren
+ f neu abrufen (fetch)
+ q Ende
+Auswahl: 1
+
+auspex
+ 1 ! main               1 vor 1 hinter
+ 2 ↑ improve-call-diag… neu, 1 Commit
+ s Projekt synchronisieren
+ f neu abrufen (fetch)
+ z zurück   q Ende
+Auswahl: 1
+
+auspex · main
+1 vor 1 hinter · divergiert
+ 1 Commits beider Seiten zeigen
+ 2 Rebase auf origin/main
+ 3 Merge von origin/main
+ 4 letzte Commits zeigen
+ z zurück   q Ende
+```
+
+- Fetching or pushing a single branch does what `sync` would do for it, without a further question. Synchronizing a whole project (`s`) or all projects (`a`) first shows how many branches it will push and fetch and asks; Enter means no.
+- A diverged branch can be resolved here. The menu shows the commits of both sides and offers a rebase of your local commits onto the remote branch or a merge of the remote branch, after a confirmation. It only does that for a branch that is checked out and has no modified tracked files. If the rebase or merge hits a conflict, it is aborted and the branch and its files are as before; conflicts are yours to resolve by hand. The result is never pushed automatically: the branch then shows as ahead and can be pushed from the same screen.
+- Rebased commits keep their author and get the host user's Git identity as committer, as does a merge commit.
+- Nothing is changed until you choose an action. Looking around is free.
+
+### The overview and sync
+
+Without a terminal (a shortcut, cron, a pipe) and with `--list`, `./crb git` prints the overview instead of the menu. It changes nothing except the fetch and lists `main` and every local branch against `origin`:
 
 ```text
 my-project · Fetch ok
@@ -296,7 +337,7 @@ Ausführen: ./crb git sync
 * lokale Änderungen im Checkout
 ```
 
-`./crb git sync` then decides per branch:
+`./crb git sync` decides per branch:
 
 | Branch against `origin` | What `sync` does |
 | --- | --- |
@@ -308,14 +349,14 @@ Ausführen: ./crb git sync
 | deleted on `origin` (for example after a merged pull request) | nothing; it is not pushed again |
 | behind, but the checkout has modified tracked files | nothing; commit or discard the changes first |
 
-It never forces a push, never merges or rebases, never deletes a branch or a worktree, and never creates local branches for branches that exist only on `origin`. A branch that cannot be handled does not stop the others. The exit code is non-zero only when a fetch, a push, or a fast-forward failed.
+`sync` never forces a push, never merges or rebases, never deletes a branch or a worktree, and never creates local branches for branches that exist only on `origin`. A branch that cannot be handled does not stop the others. The exit code is non-zero only when a fetch, a push, or a fast-forward failed.
 
 Two things to know before you make it a habit:
 
-- **`sync` pushes without a review step.** Every branch with commits goes to `origin`, including `main` if Claude committed there. If you want to review first, look at `./crb git` and push by hand, or protect `main` on the remote: a rejected push is reported and nothing is forced.
+- **`sync` pushes without a review step.** Every branch with commits goes to `origin`, including `main` if Claude committed there. If you want to review first, use the menu and push branch by branch, or protect `main` on the remote: a rejected push is reported and nothing is forced.
 - **A fast-forward changes files under a running session.** It only happens when the checkout has no modified tracked files, so no work is lost, but Claude may then see newer files than it read.
 
-**From the phone.** Both commands run without asking anything, so an iOS shortcut with the action "Run script over SSH" and the script `cd ~/claude-remote-box && ./crb git sync` is a sync button. A shortcut has no SSH agent: the host needs a key for the Git remote that works without a passphrase prompt, for example a deploy key. If the remote would ask for a passphrase, a password, or a host-key confirmation, the fetch fails instead of waiting.
+**From the phone.** For the menu, open an SSH session and run `./crb git`. The overview and `sync` run without asking anything, so an iOS shortcut with the action "Run script over SSH" and the script `cd ~/claude-remote-box && ./crb git sync` is a sync button. A shortcut has no SSH agent: the host needs a key for the Git remote that works without a passphrase prompt, for example a deploy key. If the remote would ask for a passphrase, a password, or a host-key confirmation, the fetch fails instead of waiting.
 
 **Keeping the dashboard current.** The boxes never contact `origin`; the dashboard's "hinter" counts are as fresh as the last fetch on the host. A cron line that runs the read-only overview keeps them current without pushing anything:
 
@@ -323,7 +364,7 @@ Two things to know before you make it a habit:
 */15 * * * * cd ~/claude-remote-box && ./crb git >/dev/null 2>&1
 ```
 
-`./crb git --no-fetch` shows the stored state without contacting `origin`. Projects need the `services/` layout and a remote named `origin`; other remotes are ignored.
+`--no-fetch` shows the stored state without contacting `origin`, in the overview and in the menu. Projects need the `services/` layout and a remote named `origin`; other remotes are ignored.
 
 In `worktree` mode, sessions started from the app work in git worktrees inside your project, and `crb git` handles their branches like any other. Git records a worktree with the path it has where it was created, which is the path inside the container. Clean worktrees up from inside the container, where those paths are valid: `docker compose exec my-project git worktree remove <path>`.
 

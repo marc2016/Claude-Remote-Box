@@ -388,7 +388,9 @@ run "$D" 'gb\n\n\n\n\n\n\n\ny\n' "$REPO"
 git clone -q "$REPO" "$WORK/hand-ws"
 service "$D" hand "$WORK/hand-ws"
 mkdir -p "$D/plain/workspace"; service "$D" plain ../plain/workspace
-git clone -q "$REPO" "$HOME/tilde-ws"; service "$D" tilde '~/tilde-ws'
+git clone -q "$REPO" "$HOME/tilde-ws"
+# shellcheck disable=SC2088  # the literal ~ is what a hand-written service file contains
+service "$D" tilde '~/tilde-ws'
 printf 'services:\n  novol:\n    image: alpine\n' >"$D/services/novol.yaml"
 gitcmd "$D" nope
 check "unknown project: non-zero, named, no fetch" '[ "$(rc)" -ne 0 ] && out | grep -q "Unbekanntes Projekt: nope" && [ ! -e "$D/ga/workspace/.git/FETCH_HEAD" ]'
@@ -523,6 +525,157 @@ git clone -q --bare "$WORK/seed" "$O"; git clone -q "$O" "$W"; git clone -q "$O"
 ci "$W" "local"; advance "$D/other" main 1
 gitcmd "$D" sync
 check "left for the user, exit 0" '[ "$(rc)" -eq 0 ] && out | grep -Eq "^! main +1 vor 1 hinter$" && out | grep -q "0 gepusht · 0 geholt · 1 offen"'
+
+# --- git menu ----------------------------------------------------------------
+# The menu is driven through --menu with one choice per line.
+
+# gitmenu DIR CHOICES [ARGS...]
+gitmenu() {
+  local dir=$1 choices=$2
+  shift 2
+  (cd "$dir" && printf '%b' "$choices" | "$SCRIPT" git --menu "$@") >"$WORK/out" 2>&1
+  echo $? >"$WORK/rc"
+}
+# menufx DIR: installation with project "mx" (main 2 behind, ahead-a and
+# ahead-b 1 ahead, "blocked" behind in a container-path worktree with a
+# modified file, an 18-character branch that is new), "nr" (no repository)
+# and "off" (origin unreachable). Fixed dates, so two fixtures are identical.
+menufx() {
+  local D=$1 O="$1/origin.git" W="$1/mx/workspace" X="$1/other" b
+  mkdir -p "$D"; cp "$BASE/compose.yaml" "$BASE/box.yaml" "$D/"
+  export GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:00:00Z"
+  git init -q "$D/seed"; echo one >"$D/seed/f.txt"; echo one >"$D/seed/g.txt"; git -C "$D/seed" add .; git -C "$D/seed" commit -q -m init
+  git clone -q --bare "$D/seed" "$O"; git clone -q "$O" "$W"; git clone -q "$O" "$X"
+  service "$D" mx ../mx/workspace
+  for b in ahead-a ahead-b blocked; do git -C "$W" branch -q "$b"; git -C "$W" push -q -u origin "$b" >/dev/null 2>&1; done
+  git -C "$W" worktree add -q "$W/.claude/worktrees/blocked" blocked
+  echo changed >"$W/.claude/worktrees/blocked/f.txt"
+  for b in ahead-a ahead-b; do git -C "$W" checkout -q "$b"; ci "$W" "$b local"; done
+  git -C "$W" checkout -q -b feature/eighteen-c main; ci "$W" "eighteen local"
+  git -C "$W" checkout -q main
+  advance "$X" main 1 main-new.txt
+  advance "$X" blocked 1
+  container_path "$W" blocked /workspace/.claude/worktrees/blocked
+  mkdir -p "$D/nr/workspace"; service "$D" nr ../nr/workspace
+  git clone -q "$O" "$D/off/workspace"; service "$D" off ../off/workspace
+  git -C "$D/off/workspace" remote set-url origin "ssh://git@127.0.0.1:1/none.git"
+  unset GIT_AUTHOR_DATE GIT_COMMITTER_DATE
+}
+mxstate() { git -C "$1/mx/workspace" for-each-ref refs/heads --format='%(refname) %(objectname)'; git -C "$1/origin.git" for-each-ref --format='%(refname) %(objectname)'; git -C "$1/mx/workspace" status --porcelain --untracked-files=no; cat "$1/mx/workspace/.claude/worktrees/blocked/f.txt"; }
+
+echo "Git menu: when it opens"
+D="$WORK/t-menu"; menufx "$D"; W="$D/mx/workspace"; O="$D/origin.git"
+gitcmd "$D" --list
+check "--list prints the overview and ends without a prompt" '[ "$(rc)" -ne 0 ] && out | grep -q "^mx · Fetch ok$" && out | grep -q "^↓ fast-forward" && ! out | grep -q "Auswahl:"'
+gitcmd "$D"
+check "no terminal: overview, no menu" 'out | grep -q "^mx · Fetch ok$" && ! out | grep -q "Auswahl:" && ! out | grep -q "^Projekte$"'
+gitmenu "$D" ''
+check "--menu with empty input: project list, exit 0" '[ "$(rc)" -eq 0 ] && out | grep -q "^Projekte$" && out | grep -q "Auswahl:"'
+gitcmd "$D" --list --menu
+check "--list with --menu refused" '[ "$(rc)" -ne 0 ] && out | grep -q "schließen sich aus"'
+gitcmd "$D" sync --menu
+check "sync with --menu refused" '[ "$(rc)" -ne 0 ] && out | grep -q "nicht für sync"'
+
+echo "Git menu: screens and navigation"
+before=$(mxstate "$D"); rec_before=$(records "$W")
+gitmenu "$D" 'x\n1\n1\nz\nz\n2\nz\n3\nz\nq\n'
+check "exit 0" '[ "$(rc)" -eq 0 ] || { out; false; }'
+check "project list with summaries" 'out | grep -Eq "^ 1 mx +↑3 ↓1 !1$" && out | grep -Eq "^ 2 nr +kein Git-Repository$" && out | grep -Eq "^ 3 off +Fetch fehlgeschlagen$"'
+check "unknown input repeats the screen with a note" 'out | grep -q "^.x. steht nicht zur Auswahl\.$" && [ "$(out | grep -c "^Projekte$")" -ge 2 ]'
+check "project screen: workspace branch first, numbered" '[ "$(out | grep -A1 "^mx$" | sed -n 2p)" = " 1 ↓ main               2 hinter" ] && out | grep -Eq "^ 2 ↑ ahead-a +1 vor$" && out | grep -Eq "^ 4 ! blocked +1 hinter$" && out | grep -q "^ s Projekt synchronisieren$"'
+check "branch screen: only the actions for its state" 'out | grep -q "^mx · main$" && out | grep -q "^ 1 holen (fast-forward)$" && out | grep -q "^ 2 letzte Commits zeigen$" && ! out | grep -q "pushen$"'
+check "z goes back one screen, q ends" '[ "$(out | grep -c "^mx$")" -eq 2 ] && [ "$(out | grep -c "^Projekte$")" -eq 5 ]'
+check "no repository: reason, no actions" 'out | grep -q "^kein Git-Repository\.$"'
+check "failed fetch: stored state, actions locked" 'out | grep -q "Aktionen sind gesperrt" && out | grep -Eq "^   = main +aktuell$" && [ "$(out | grep -c "s Projekt synchronisieren")" -eq 2 ]'
+check "navigating changes nothing" '[ "$(mxstate "$D")" = "$before" ] && [ "$(records "$W")" = "$rec_before" ]'
+check "menu lines fit 40 columns" 'out | grep -Eq "^ 5 ↑ feature/eighteen-c neu, 1 Commit$" && { [ -z "$UTF" ] || [ "$(out | grep -E "^ *[0-9]+ [↓↑!=] " | LC_ALL=$UTF widest)" -le 40 ]; }'
+gitmenu "$D" '' mx
+check "one project named: starts at its branches" '[ "$(rc)" -eq 0 ] && out | grep -q "^mx$" && ! out | grep -q "^Projekte$" && ! out | grep -q "Abrufen: nr"'
+gitmenu "$D" '1\n'
+check "input ends after one choice: exit 0" '[ "$(rc)" -eq 0 ] && out | grep -q "^mx$"'
+gitmenu "$D" 'q\n' --no-fetch
+check "--no-fetch skips the first fetch" '[ "$(rc)" -eq 0 ] && out | grep -Eq "^ 3 off +aktuell$"'
+
+echo "Git menu: actions"
+gitmenu "$D" '1\ns\n\nq\n'
+check "project sync declined: counts shown, nothing changed" 'out | grep -q "^3 pushen, 1 holen. Ausführen? (y/N): $" && out | grep -q "^Nichts geändert\.$" && [ "$(mxstate "$D")" = "$before" ]'
+gitmenu "$D" '1\n4\n1\nq\n'
+check "blocked pull: no fetch offered, reason, modified files listed" 'out | grep -q "^mx · blocked$" && out | grep -q "lokale Änderungen, kein Pull" && out | grep -q "^ 1 geänderte Dateien zeigen$" && ! out | grep -A4 "^mx · blocked$" | grep -q "holen (fast-forward)" && out | grep -q "^   M f.txt$"'
+gitmenu "$D" '1\n2\n1\nz\nq\n'
+check "push one branch: the other stays local" '[ "$(ref "$O" ahead-a)" = "$(ref "$W" ahead-a)" ] && [ "$(ref "$O" ahead-b)" != "$(ref "$W" ahead-b)" ] && out | grep -q "^✓ ahead-a: 1 gepusht$"'
+check "screens show the new state" 'out | grep -A1 "^mx · ahead-a$" | grep -q "^aktuell$" && out | grep -Eq "^ 2 = ahead-a +aktuell$" && out | grep -Eq "^ 3 ↑ ahead-b +1 vor$"'
+gitmenu "$D" '1\n1\n1\nq\n'
+check "fetch one branch: workspace moved" '[ "$(ref "$W" HEAD)" = "$(ref "$O" main)" ] && [ -f "$W/main-new.txt" ] && out | grep -q "^✓ main: 2 geholt$" && out | grep -A1 "^mx · main$" | tail -n 1 | grep -q "^aktuell$"'
+printf '#!/bin/sh\nwhile read -r old new name; do [ "$name" = refs/heads/ahead-b ] && { echo "ahead-b is protected"; exit 1; }; done\nexit 0\n' >"$O/hooks/pre-receive"; chmod +x "$O/hooks/pre-receive"
+gitmenu "$D" '1\n3\n1\n2\nq\n'
+check "rejected push: message, branch still ahead, menu keeps running" '[ "$(rc)" -eq 0 ] && out | grep -q "^✗ ahead-b: 1 vor$" && out | grep -q "ahead-b is protected" && [ "$(ref "$O" ahead-b)" != "$(ref "$W" ahead-b)" ] && out | grep -q "ahead-b local" && [ "$(out | grep -c "^mx · ahead-b$")" -eq 3 ]'
+gitmenu "$D" 'f\nq\n'
+check "fetch again from the project list" '[ "$(out | grep -c "^Abrufen: mx$")" -eq 2 ]'
+
+echo "Git menu: synchronize all equals crb git sync"
+A="$WORK/t-menu-a"; B="$WORK/t-menu-b"; menufx "$A"; menufx "$B"
+check "fixtures identical" '[ "$(mxstate "$A")" = "$(mxstate "$B")" ]'
+gitmenu "$A" 'a\ny\nq\n'
+check "exit 0" '[ "$(rc)" -eq 0 ] || { out; false; }'
+check "confirmation with counts, result counts, new summaries" 'out | grep -q "3 pushen, 1 holen. Ausführen?" && out | grep -q "^3 gepusht · 1 geholt · 1 offen$" && out | grep -Eq "^ 1 mx +!1$"'
+gitcmd "$B" sync
+check "same refs and files as crb git sync" '[ "$(mxstate "$A")" = "$(mxstate "$B")" ] && [ -f "$A/mx/workspace/main-new.txt" ]'
+gitmenu "$A" 'a\nq\n'
+check "nothing left: says so, asks nothing" 'out | grep -q "^Nichts zu pushen oder zu holen\.$" && ! out | grep -q "Ausführen?"'
+
+# divfx DIR MODE: project "dv" whose main is 1 ahead and 1 behind. MODE clean:
+# the two commits touch different files; conflict: the same line.
+divfx() {
+  local D=$1 mode=$2 O="$1/origin.git" W="$1/dv/workspace" X="$1/other"
+  mkdir -p "$D"; cp "$BASE/compose.yaml" "$BASE/box.yaml" "$D/"
+  git init -q "$D/seed"; echo one >"$D/seed/f.txt"; echo one >"$D/seed/g.txt"; git -C "$D/seed" add .; git -C "$D/seed" commit -q -m init
+  git clone -q --bare "$D/seed" "$O"; git clone -q "$O" "$W"; git clone -q "$O" "$X"
+  service "$D" dv ../dv/workspace
+  echo local >>"$W/g.txt"; git -C "$W" commit -q -am "local g"
+  if [ "$mode" = clean ]; then echo remote >>"$X/f.txt"; else echo remote >>"$X/g.txt"; fi
+  git -C "$X" commit -q -am "remote change"; git -C "$X" push -q origin main
+}
+clean() { [ -z "$(git -C "$1" status --porcelain --untracked-files=no)" ] && [ ! -e "$1/.git/rebase-merge" ] && [ ! -e "$1/.git/rebase-apply" ] && [ ! -e "$1/.git/MERGE_HEAD" ]; }
+
+echo "Git menu: diverged branch"
+D="$WORK/t-div1"; divfx "$D" clean; W="$D/dv/workspace"; O="$D/origin.git"; o_before=$(ref "$O" main); h_before=$(ref "$W" HEAD)
+gitmenu "$D" '1\n1\nq\n' dv
+check "branch screen offers both sides, rebase, merge" 'out | grep -q "^1 vor 1 hinter · divergiert" && out | grep -q "^ 1 Commits beider Seiten zeigen$" && out | grep -q "^ 2 Rebase auf origin/main$" && out | grep -q "^ 3 Merge von origin/main$"'
+check "both sides under their labels" '[ "$(out | grep -A1 "^lokal:$" | tail -n 1 | cut -d" " -f4-)" = "local g" ] && [ "$(out | grep -A1 "^auf origin:$" | tail -n 1 | cut -d" " -f4-)" = "remote change" ]'
+gitmenu "$D" '1\n2\n\nq\n' dv
+check "rebase declined: nothing changed" 'out | grep -q "^Nichts geändert\.$" && [ "$(ref "$W" HEAD)" = "$h_before" ]'
+gitmenu "$D" '1\n2\ny\nq\n' dv
+check "rebase without conflict: remote commit, then the local one" '[ "$(rc)" -eq 0 ] && out | grep -q "^✓ Rebase fertig\.$" && [ "$(git -C "$W" log --format=%s -n 2 | tr "\n" "|")" = "local g|remote change|" ] && clean "$W"'
+check "only ahead now, push offered, origin untouched" 'out | grep -A1 "^dv · main$" | tail -n 1 | grep -q "^1 vor$" && out | grep -q "^ 1 pushen$" && [ "$(ref "$O" main)" = "$o_before" ]'
+D="$WORK/t-div2"; divfx "$D" clean; W="$D/dv/workspace"; O="$D/origin.git"; o_before=$(ref "$O" main)
+gitmenu "$D" '1\n3\ny\nq\n' dv
+check "merge without conflict: two parents, ahead only, origin untouched" 'out | grep -q "^✓ Merge fertig\.$" && [ "$(git -C "$W" rev-list --parents -n 1 HEAD | wc -w)" -eq 3 ] && out | grep -A1 "^dv · main$" | tail -n 1 | grep -q "^2 vor$" && [ "$(ref "$O" main)" = "$o_before" ] && clean "$W"'
+D="$WORK/t-div3"; divfx "$D" conflict; W="$D/dv/workspace"; h_before=$(ref "$W" HEAD)
+gitmenu "$D" '1\n2\ny\nq\n' dv
+check "conflicting rebase aborted: as before, file named" '[ "$(rc)" -eq 0 ] && out | grep -q "Rebase abgebrochen, Stand wie vorher" && out | grep -A1 "^Konflikt in:$" | grep -q "g.txt" && out | grep -q "^Bitte von Hand lösen\.$" && [ "$(ref "$W" HEAD)" = "$h_before" ] && clean "$W"'
+gitmenu "$D" '1\n3\ny\nq\n' dv
+check "conflicting merge aborted: as before, file named" 'out | grep -q "Merge abgebrochen, Stand wie vorher" && out | grep -A1 "^Konflikt in:$" | grep -q "g.txt" && [ "$(ref "$W" HEAD)" = "$h_before" ] && clean "$W"'
+check "still diverged afterwards" 'out | grep -q "^1 vor 1 hinter · divergiert"'
+echo edit >>"$W/f.txt"
+gitmenu "$D" '1\nq\n' dv
+check "local changes: neither offered, reason given" '! out | grep -q "Rebase auf" && ! out | grep -q "Merge von" && out | grep -q "Erst committen oder verwerfen" && out | grep -q "^ 2 geänderte Dateien zeigen$"'
+git -C "$W" checkout -q -- f.txt; mkdir "$W/.git/rebase-merge"
+gitmenu "$D" '1\nq\n' dv
+check "rebase in progress: neither offered" '! out | grep -q "Rebase auf" && out | grep -q "läuft schon Rebase oder Merge"'
+rmdir "$W/.git/rebase-merge"
+git -C "$W" checkout -q -b parked; gitmenu "$D" '2\nq\n' dv
+check "not checked out: neither offered, reason given" 'out | grep -q "^dv · main$" && ! out | grep -q "Rebase auf" && out | grep -q "Nicht ausgecheckt"'
+
+echo "Git menu: diverged branch in a container-path worktree"
+D="$WORK/t-div4"; divfx "$D" clean; W="$D/dv/workspace"; X="$D/other"
+git -C "$W" branch -q wt origin/main; git -C "$W" push -q -u origin wt >/dev/null 2>&1
+git -C "$W" worktree add -q "$W/.claude/worktrees/calm" wt
+echo local >>"$W/.claude/worktrees/calm/g.txt"; git -C "$W/.claude/worktrees/calm" commit -q -am "wt local"
+git -C "$X" fetch -q origin; git -C "$X" checkout -q -B wt origin/wt; echo remote >>"$X/f.txt"; git -C "$X" commit -q -am "wt remote"; git -C "$X" push -q origin wt
+container_path "$W" calm /workspace/.claude/worktrees/calm
+rec_before=$(records "$W")
+gitmenu "$D" '2\n2\ny\nq\n' dv
+check "rebased in the worktree on the host, record unchanged" 'out | grep -q "^dv · wt$" && out | grep -q "^✓ Rebase fertig\.$" && [ "$(git -C "$W" log --format=%s -n 2 wt | tr "\n" "|")" = "wt local|wt remote|" ] && grep -q remote "$W/.claude/worktrees/calm/f.txt" && [ "$(records "$W")" = "$rec_before" ]'
 
 echo "Git: refuses root"
 (cd "$BASE" && PATH="$FAKE/root-only:$PATH" "$SCRIPT" git </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
