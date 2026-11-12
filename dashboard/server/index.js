@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// Dashboard server: ingest, read API, SSE, static web app. No framework.
+// Dashboard server: ingest, read API, SSE, login, static web app. No framework.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDb } from './db.js';
 import { buildCards } from './cards.js';
+import { authSettings, createAuth } from './auth.js';
 import { TIMELINE_TYPES } from '../shared/model.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -20,12 +21,14 @@ const cfg = {
 const MAX_BODY = 5 * 1024 * 1024;
 const SSE_DEBOUNCE_MS = 500;
 const PRUNE_EVERY_MS = 6 * 60 * 60 * 1000;
+const SESSION_CHECK_MS = 5000;
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
 export function createServer(store, options = {}) {
   const token = options.token ?? cfg.token;
   const webDir = options.webDir ?? cfg.webDir;
+  const auth = createAuth(store, authSettings(options), { now: options.now, log: options.log });
   const clients = new Set();
   let pending = new Set();
   let timer = null;
@@ -41,14 +44,32 @@ export function createServer(store, options = {}) {
     }, SSE_DEBOUNCE_MS);
   }
 
+  // Streams whose session ended (sign-out, or logout and reset on the host) are closed.
+  const sessionCheck = auth.settings.on ? setInterval(() => {
+    for (const res of clients) if (!store.sessionAlive(res.crbSession)) res.end();
+  }, options.sessionCheckMs ?? SESSION_CHECK_MS) : null;
+  sessionCheck?.unref();
+
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
     const p = url.pathname;
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('referrer-policy', 'no-referrer');
+    res.setHeader('x-frame-options', 'DENY');
+    res.setHeader('content-security-policy', "frame-ancestors 'none'");
     try {
       if (req.method === 'POST' && p === '/api/ingest') return ingest(req, res);
+      if (p.startsWith('/api/auth/')) {
+        return void auth.handle(req, res, p, json).then((done) => { if (!done) json(res, 404, { error: 'not found' }); }, (e) => {
+          console.error('auth request failed', e);
+          if (!res.headersSent) json(res, 500, { error: 'internal' }); else res.end();
+        });
+      }
+      const m = req.method === 'GET' && /^\/api\/sessions\/([^/]+)\/events$/.exec(p);
+      const data = m || (req.method === 'GET' && (p === '/api/boxes' || p === '/api/events'));
+      if (data && !auth.allowed(req, res)) return json(res, 401, { error: 'unauthorized' });
       if (req.method === 'GET' && p === '/api/boxes') return json(res, 200, buildCards(store));
       if (req.method === 'GET' && p === '/api/events') return sse(req, res);
-      const m = req.method === 'GET' && /^\/api\/sessions\/([^/]+)\/events$/.exec(p);
       if (m) {
         const limit = Math.min(1000, Math.max(1, parseInt(url.searchParams.get('limit') || '200', 10) || 200));
         const beforeRaw = url.searchParams.get('before');
@@ -67,8 +88,13 @@ export function createServer(store, options = {}) {
   });
 
   function ingest(req, res) {
-    const auth = req.headers.authorization || '';
-    if (!token || auth !== `Bearer ${token}`) return json(res, 401, { error: 'unauthorized' });
+    // Boxes report over the Compose network; what a proxy forwards is refused unless remote boxes are enabled.
+    if (!auth.settings.remoteIngest && (req.headers['x-forwarded-for'] !== undefined || req.headers.forwarded !== undefined)) {
+      res.setHeader('connection', 'close');
+      return json(res, 403, { error: 'ingest through a proxy is not enabled' });
+    }
+    const bearer = req.headers.authorization || '';
+    if (!token || bearer !== `Bearer ${token}`) return json(res, 401, { error: 'unauthorized' });
     let body = '';
     let size = 0;
     req.on('data', (c) => { size += c.length; if (size > MAX_BODY) { req.destroy(); return; } body += c; });
@@ -90,6 +116,7 @@ export function createServer(store, options = {}) {
   function sse(req, res) {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-accel-buffering': 'no' });
     res.write(`event: hello\ndata: ${JSON.stringify({ at: new Date().toISOString() })}\n\n`);
+    res.crbSession = auth.settings.on ? auth.sessionOf(req, null)?.hash : null;
     clients.add(res);
     const ping = setInterval(() => res.write(': ping\n\n'), 25000);
     req.on('close', () => { clearInterval(ping); clients.delete(res); });
@@ -106,7 +133,9 @@ export function createServer(store, options = {}) {
     fs.createReadStream(file).pipe(res);
   }
 
+  server.on('close', () => { if (sessionCheck) clearInterval(sessionCheck); });
   server.clients = clients;
+  server.auth = auth;
   return server;
 }
 
@@ -124,6 +153,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   if (pruned.events || pruned.sessions) console.log(`pruned ${pruned.events} events, ${pruned.sessions} sessions`);
   setInterval(() => store.prune(), PRUNE_EVERY_MS).unref();
   const server = createServer(store);
+  const login = server.auth.settings;
+  if (!login.on) console.error('warning: CRB_DASHBOARD_AUTH=off, the page and its data are open to everyone who reaches this port');
+  else if (login.invalidUrl) console.error(`warning: CRB_DASHBOARD_URL "${login.invalidUrl}" is not an https:// origin without a path; the dashboard stays locked`);
+  else if (!login.url) console.error('note: CRB_DASHBOARD_URL is empty, the dashboard is locked; run ./crb dashboard login');
+  if (login.proxy.bad.length) console.error(`warning: CRB_DASHBOARD_PROXY entries ignored: ${login.proxy.bad.join(', ')}`);
   server.on('error', (e) => {
     if (e && e.code === 'EADDRINUSE') console.error(`port ${cfg.port} is in use; pick another one with PORT=<n>`);
     else console.error('server failed', e);

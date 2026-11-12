@@ -21,7 +21,8 @@ if (!existsSync(path.join(here, 'web', 'dist', 'index.html'))) {
 
 const data = mkdtempSync(path.join(os.tmpdir(), 'crb-demo-'));
 const server = spawn(process.execPath, [path.join(here, 'server', 'index.js')], {
-  env: { ...process.env, PORT: port, HOST: '127.0.0.1', CRB_STATUS_TOKEN: token, DATA_DIR: data, WEB_DIR: path.join(here, 'web', 'dist') },
+  // The demo has no user to sign in: the login is off.
+  env: { ...process.env, PORT: port, HOST: '127.0.0.1', CRB_STATUS_TOKEN: token, CRB_DASHBOARD_AUTH: 'off', DATA_DIR: data, WEB_DIR: path.join(here, 'web', 'dist') },
   stdio: ['ignore', 'ignore', 'inherit'],
 });
 

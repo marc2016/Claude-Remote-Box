@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { WifiOff } from 'lucide-react';
+import { LogOut, WifiOff } from 'lucide-react';
 import type { BoxesResponse } from '@shared/types';
 import { BoxCard } from '@/components/BoxCard';
 import { DetailView } from '@/components/DetailView';
+import { Enroll, SetupHint, SignIn, WrongAddress } from '@/components/AuthScreens';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { fetchBoxes, subscribe } from '@/lib/api';
+import { enrollSecret, fetchAuthState, signOut, UnauthorizedError, type AuthState } from '@/lib/auth';
 
 const REFRESH_MS = 30000;
 const TICK_MS = 5000;
@@ -24,7 +27,39 @@ function transition(update: () => void, type: 'open' | 'close') {
   catch { d.startViewTransition(cb); } // older signature: callback only
 }
 
+/** Decides between the dashboard and the screens of the login. */
 export default function App() {
+  const [auth, setAuth] = useState<AuthState | null>(null);
+  const [failed, setFailed] = useState(false);
+  // The enrollment link's secret, until its passkey is stored.
+  const [secret, setSecret] = useState<string | null>(enrollSecret);
+
+  const check = useCallback(() => {
+    fetchAuthState().then((s) => { setAuth(s); setFailed(false); }).catch(() => setFailed(true));
+  }, []);
+  useEffect(() => {
+    check();
+    if (!failed) return;
+    const retry = setInterval(check, 5000);
+    return () => clearInterval(retry);
+  }, [check, failed]);
+
+  if (!auth) {
+    return (
+      <main className="mx-auto flex min-h-dvh w-full max-w-6xl flex-col gap-4 px-4 py-4">
+        {failed ? <p className="text-destructive text-sm">Server nicht erreichbar.</p> : <Skeleton className="h-48 rounded-xl" />}
+      </main>
+    );
+  }
+  if (auth.auth === 'off') return <Dashboard />;
+  if (secret) return <Enroll secret={secret} onDone={() => { setSecret(null); check(); }} />;
+  if (auth.signedIn) return <Dashboard onUnauthorized={check} onSignOut={() => { signOut().catch(() => {}).finally(check); }} />;
+  if (!auth.configured || !auth.passkeys) return <SetupHint />;
+  if (auth.url !== location.origin) return <WrongAddress url={auth.url} />;
+  return <SignIn onDone={check} />;
+}
+
+function Dashboard({ onUnauthorized, onSignOut }: { onUnauthorized?: () => void; onSignOut?: () => void }) {
   const [data, setData] = useState<BoxesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
@@ -35,15 +70,23 @@ export default function App() {
   const [ticks, setTicks] = useState<Record<string, number>>({});
 
   const refresh = useCallback(() => {
-    fetchBoxes().then((d) => { setData(d); setError(null); }).catch((e) => setError(String(e.message || e)));
-  }, []);
+    fetchBoxes().then((d) => { setData(d); setError(null); }).catch((e) => {
+      // The session ended (sign-out elsewhere, logout on the host, or 30 days without use).
+      if (e instanceof UnauthorizedError && onUnauthorized) onUnauthorized();
+      else setError(String(e.message || e));
+    });
+  }, [onUnauthorized]);
 
   useEffect(() => {
     refresh();
     const stop = subscribe((boxes) => {
       refresh();
       if (boxes.length) setTicks((t) => { const n = { ...t }; for (const b of boxes) n[b] = (n[b] ?? 0) + 1; return n; });
-    }, setLive);
+    }, (open) => {
+      setLive(open);
+      // The server closes the stream when the session ends; asking for the boxes shows whether that is why.
+      if (!open) refresh();
+    });
     const poll = setInterval(refresh, REFRESH_MS);
     const tick = setInterval(() => setNow(Date.now()), TICK_MS);
     const onHash = () => { const next = boxFromHash(); setAnimBox((cur) => next ?? cur); transition(() => setOpenBox(next), next ? 'open' : 'close'); };
@@ -75,6 +118,11 @@ export default function App() {
             {live ? <span className="bg-success inline-block size-2 rounded-full" /> : <WifiOff className="size-3.5" />}
             {live ? 'live' : 'verbinde …'}
           </span>
+          {onSignOut && (
+            <Button variant="ghost" size="icon-sm" className="sm:w-auto sm:px-2.5" onClick={onSignOut} aria-label="Abmelden" title="Abmelden">
+              <LogOut /> <span className="hidden sm:inline">Abmelden</span>
+            </Button>
+          )}
         </header>
 
         {error && <p className="text-destructive text-sm">Server nicht erreichbar: {error}</p>}

@@ -213,3 +213,103 @@ test('events outside the contract are stored but harmless', () => {
   assert.equal(store.db.prepare('SELECT COUNT(*) c FROM events').get().c, 2);
   assert.equal(buildCards(store, T0).boxes[0].sessions[0].label, 'ok');
 });
+
+// --- Login -----------------------------------------------------------------
+
+const DAY = 86400000;
+const key = () => ({ id: 'cred-1', publicKey: new Uint8Array([1, 2, 3]), counter: 0, transports: ['internal'], label: 'iPhone' });
+
+test('login: a session lasts 30 days after its last use and is pruned after that', () => {
+  const store = openDb(':memory:');
+  store.addPasskey(key(), new Date(T0));
+  const value = store.createSession('cred-1', new Date(T0));
+  assert.ok(store.session(value, new Date(T0 + 29 * DAY)), 'used on day 29');
+  assert.ok(store.session(value, new Date(T0 + 58 * DAY)), '29 days after the last use');
+  assert.equal(store.session(value, new Date(T0 + 89 * DAY + 1000)), null, '31 days after the last use');
+  assert.equal(store.db.prepare('SELECT COUNT(*) c FROM auth_sessions').get().c, 1);
+  store.prune(new Date(T0 + 89 * DAY + 1000));
+  assert.equal(store.db.prepare('SELECT COUNT(*) c FROM auth_sessions').get().c, 0);
+});
+
+test('login: last use is written at most once a minute and reported as renewed', () => {
+  const store = openDb(':memory:');
+  store.addPasskey(key(), new Date(T0));
+  const value = store.createSession('cred-1', new Date(T0));
+  assert.equal(store.session(value, new Date(T0 + 30000)).renewed, false);
+  assert.equal(store.session(value, new Date(T0 + 61000)).renewed, true);
+  assert.equal(store.db.prepare('SELECT last_used FROM auth_sessions').get().last_used, new Date(T0 + 61000).toISOString());
+});
+
+test('login: ending one session keeps the others, unknown values give no session', () => {
+  const store = openDb(':memory:');
+  store.addPasskey(key(), new Date(T0));
+  const a = store.createSession('cred-1', new Date(T0));
+  const b = store.createSession('cred-1', new Date(T0));
+  assert.equal(store.endSession(a), 1);
+  assert.equal(store.session(a, new Date(T0)), null);
+  assert.ok(store.session(b, new Date(T0)));
+  assert.equal(store.session('nope', new Date(T0)), null);
+  assert.equal(store.session('', new Date(T0)), null);
+  assert.equal(store.endAllSessions(new Date(T0)), 1);
+  assert.equal(store.session(b, new Date(T0)), null);
+});
+
+test('login: a second enrollment link replaces the first, links expire after 10 minutes', () => {
+  const store = openDb(':memory:');
+  const first = store.issueEnroll(new Date(T0));
+  assert.equal(store.enrollState(first, new Date(T0 + 9 * 60000)), 'ok');
+  assert.equal(store.enrollState(first, new Date(T0 + 11 * 60000)), 'expired');
+  const second = store.issueEnroll(new Date(T0 + 60000));
+  assert.equal(store.enrollState(first, new Date(T0 + 61000)), 'unknown');
+  assert.equal(store.enrollState(second, new Date(T0 + 61000)), 'ok');
+  assert.equal(store.db.prepare('SELECT COUNT(*) c FROM auth_enroll').get().c, 1);
+  store.spendEnroll();
+  assert.equal(store.enrollState(second, new Date(T0 + 61000)), 'unknown');
+  store.issueEnroll(new Date(T0));
+  store.prune(new Date(T0 + 11 * 60000));
+  assert.equal(store.db.prepare('SELECT COUNT(*) c FROM auth_enroll').get().c, 0);
+});
+
+test('login: neither the cookie value nor the link secret is stored', () => {
+  const store = openDb(':memory:');
+  store.addPasskey(key(), new Date(T0));
+  const value = store.createSession('cred-1', new Date(T0));
+  const secret = store.issueEnroll(new Date(T0));
+  const dump = JSON.stringify([store.db.prepare('SELECT hash, passkey FROM auth_sessions').all(), store.db.prepare('SELECT hash FROM auth_enroll').all()]);
+  assert.ok(!dump.includes(value) && !dump.includes(secret));
+  assert.notEqual(value, secret);
+  assert.ok(value.length >= 43 && secret.length >= 43, '32 random bytes each');
+});
+
+test('login: reset removes passkeys, sessions and the link; a session without its passkey is gone', () => {
+  const store = openDb(':memory:');
+  store.addPasskey(key(), new Date(T0));
+  const value = store.createSession('cred-1', new Date(T0));
+  const secret = store.issueEnroll(new Date(T0));
+  assert.equal(store.passkeyCount(), 1);
+  assert.deepEqual(store.passkey('cred-1').transports, ['internal']);
+  assert.deepEqual([...store.passkey('cred-1').publicKey], [1, 2, 3]);
+  store.usedPasskey('cred-1', 7, new Date(T0));
+  assert.equal(store.passkey('cred-1').counter, 7);
+  assert.deepEqual(store.resetAuth(new Date(T0)), { passkeys: 1, sessions: 1 });
+  assert.equal(store.passkeyCount(), 0);
+  assert.equal(store.session(value, new Date(T0)), null);
+  assert.equal(store.enrollState(secret, new Date(T0)), 'unknown');
+  assert.equal(store.passkey('cred-1'), null);
+});
+
+test('login: a database of the current release gets the tables and keeps its data', () => {
+  const { DatabaseSync } = require_sqlite();
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'crb-db-')), 'released.sqlite');
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE events (box TEXT NOT NULL, run TEXT NOT NULL DEFAULT '', seq INTEGER NOT NULL, session TEXT, ts TEXT NOT NULL, type TEXT NOT NULL, json TEXT NOT NULL, received TEXT NOT NULL, PRIMARY KEY (box, run, seq));
+    CREATE TABLE boxes (name TEXT PRIMARY KEY, phase TEXT, last_heartbeat TEXT, image TEXT, claude_version TEXT, spawn TEXT, uptime_s INTEGER, git_json TEXT, updated TEXT);
+    INSERT INTO boxes (name, phase) VALUES ('b1', 'running');
+    INSERT INTO events VALUES ('b1', '', 1, 's1', '${iso(0)}', 'prompt', '{"box":"b1","seq":1,"type":"prompt","session":"s1","text":"alt"}', '${iso(0)}');`);
+  old.close();
+  const store = openDb(file);
+  assert.equal(store.passkeyCount(), 0);
+  assert.equal(store.boxes()[0].phase, 'running');
+  assert.equal(store.sessionEvents('s1').length, 1);
+  store.close();
+});

@@ -291,7 +291,7 @@ check "exit non-zero naming compose.yaml" '[ "$(rc)" -ne 0 ] && out | grep -q "k
 # dashboard DIR ANSWERS: runs `crb dashboard` (real docker compose config, nothing is pulled).
 dashboard() {
   local dir=$1 answers=$2
-  (cd "$dir" && printf '%b' "$answers" | "$SCRIPT" dashboard) >"$WORK/out" 2>&1
+  (cd "$dir" && printf '%b' "$answers" | "$SCRIPT" dashboard ${3:+"$3"}) >"$WORK/out" 2>&1
   echo $? >"$WORK/rc"
 }
 
@@ -304,15 +304,20 @@ dashboard "$D" 'n\n'
 check "declined: exit 0, nothing changed" '[ "$(rc)" -eq 0 ] && out | grep -q "nichts geändert" && [ "$(snapshot "$D")" = "$before" ]'
 dashboard "$D" 'y\n'
 check "exit 0" '[ "$(rc)" -eq 0 ] || { out; false; }'
+check "next step named, no word of a missing login" 'out | grep -q "./crb dashboard login" && ! out | grep -qi "kein Login" && ! grep -qi "no login" "$D/services/crb-dashboard.yaml"'
 check "token in .env, service file, include" 'grep -qE "^CRB_STATUS_TOKEN=[A-Za-z0-9]{32}$" "$D/.env" && [ -f "$D/services/crb-dashboard.yaml" ] && grep -q "services/crb-dashboard.yaml" "$D/compose.yaml"'
 TOKEN=$(sed -n "s/^CRB_STATUS_TOKEN=//p" "$D/.env")
 check "boxes wired with URL and token" '(cd "$D" && docker compose config d1) | grep -q "CRB_STATUS_URL: http://crb-dashboard:8080/api/ingest" && (cd "$D" && docker compose config d2) | grep -q "CRB_STATUS_TOKEN: $TOKEN" && (cd "$D" && docker compose config d1) | grep -q "CRB_EXTRA_ARGS\|CRB_NAME: d1"'
 CFG=$(cd "$D" && docker compose config crb-dashboard)
 check "dashboard: loopback port, one mount, hardened, config valid" 'echo "$CFG" | grep -q "host_ip: 127.0.0.1" && echo "$CFG" | grep -q "published: \"8080\"" && [ "$(echo "$CFG" | grep -c "target: /")" -eq 1 ] && echo "$CFG" | grep -q "target: /data" && echo "$CFG" | grep -q -- "- ALL" && (cd "$D" && docker compose config -q)'
+check "login variables wired from .env, empty by default" '(cd "$D" && CRB_DASHBOARD_URL=https://crb.example.org docker compose config crb-dashboard) | grep -q "CRB_DASHBOARD_URL: https://crb.example.org" && [ "$(echo "$CFG" | grep -cE "CRB_DASHBOARD_(URL|PROXY|AUTH|REMOTE_INGEST): \"\"")" -eq 4 ]'
 check "CRB_DASHBOARD_BIND honored" '(cd "$D" && CRB_DASHBOARD_BIND=0.0.0.0:9000 docker compose config crb-dashboard) | grep -q "published: \"9000\""'
 before=$(snapshot "$D")
 dashboard "$D" ''
 check "second run: already present, nothing changed" '[ "$(rc)" -eq 0 ] && out | grep -q "schon vorhanden" && [ "$(snapshot "$D")" = "$before" ]'
+
+dashboard "$D" '' foo
+check "unknown argument: usage, non-zero, nothing changed" '[ "$(rc)" -ne 0 ] && out | grep -q "Usage:" && out | grep -q "dashboard login" && [ "$(snapshot "$D")" = "$before" ]'
 
 echo "Dashboard: single-file setup gets a hint"
 D="$WORK/t-dashsingle"; mkdir -p "$D"; cp "$EXAMPLE" "$D/compose.yaml"
@@ -330,6 +335,117 @@ check "variables back in every box, all boxes listed for recreate" '(cd "$D" && 
 # d1 still asks for its mode (default, keep); nothing else
 update "$D" '\n'
 check "already wired: no question, dashboard not treated as a project" '[ "$(rc)" -eq 0 ] && ! out | grep -q "Status-Variablen" && out | grep -q "Boxen angebunden" && ! out | grep -q "crb-dashboard: nicht von crb"'
+
+echo "Update: reconciles the dashboard's login variables"
+D="$WORK/t-dash"; DF="$D/services/crb-dashboard.yaml"
+cp "$DF" "$WORK/dash.new"
+sed -i.bak -E "/CRB_DASHBOARD_(URL|PROXY|AUTH|REMOTE_INGEST):/d" "$DF"; rm -f "$DF.bak"
+cp "$DF" "$WORK/dash.old"
+check "precondition: a service file from before the login" '! grep -qE "CRB_DASHBOARD_(URL|PROXY|AUTH|REMOTE_INGEST):" "$DF" && grep -q CRB_STATUS_TOKEN "$DF"'
+# login variables n; d1: mode (default, keep)
+update "$D" 'n\n\n'
+check "declined: file unchanged, consequence named" '[ "$(rc)" -eq 0 ] && cmp -s "$DF" "$WORK/dash.old" && out | grep -q "nicht über .env einstellen" && out | grep -q "keine, die Installation ist aktuell"'
+# login variables yes (default); d1: mode; apply y; recreate n
+update "$D" '\n\ny\nn\n'
+check "exit 0" '[ "$(rc)" -eq 0 ] || { out; false; }'
+check "the four lines are added, every other line as before" 'cmp -s "$DF" "$WORK/dash.new"'
+check "config shows the variables, dashboard listed for recreate, locked state named" '[ "$( (cd "$D" && docker compose config crb-dashboard) | grep -cE "CRB_DASHBOARD_(URL|PROXY|AUTH|REMOTE_INGEST):")" -eq 4 ] && out | grep -q "Später: docker compose up -d crb-dashboard" && out | grep -q "gesperrt, bis mit ./crb dashboard login"'
+update "$D" '\n'
+check "already present: no question, file unchanged" '[ "$(rc)" -eq 0 ] && ! out | grep -q "Login-Variablen" && cmp -s "$DF" "$WORK/dash.new"'
+sed -e "1s/.*/# My own dashboard service./" "$WORK/dash.old" >"$DF"; cp "$DF" "$WORK/dash.own"
+update "$D" '\n'
+# shellcheck disable=SC2016
+check "not created by crb: byte-identical, lines printed" '[ "$(rc)" -eq 0 ] && cmp -s "$DF" "$WORK/dash.own" && out | grep -qF "CRB_DASHBOARD_URL: \"\${CRB_DASHBOARD_URL:-}\"" && out | grep -qF "CRB_DASHBOARD_REMOTE_INGEST: \"\${CRB_DASHBOARD_REMOTE_INGEST:-}\"" && ! out | grep -q "Login-Variablen in"'
+cp "$WORK/dash.new" "$DF"
+
+# Stub for the login commands: `compose ps`, `up`, and `exec` are answered from
+# files in $STUB_DIR (exec: the file named like the admin command); the rest is real.
+LSTUB="$WORK/lstub"; mkdir -p "$LSTUB" "$WORK/answers"
+cat >"$LSTUB/docker" <<EOF
+#!/bin/sh
+echo "docker \$*" >> "\$DOCKER_LOG"
+case "\$1 \$2" in
+  "compose ps") cat "\$STUB_DIR/ps" 2>/dev/null; exit 0 ;;
+  "compose up") exit 0 ;;
+  "compose exec") for a in "\$@"; do cmd=\$a; done; cat "\$STUB_DIR/\$cmd" 2>/dev/null || exit 1; exit 0 ;;
+esac
+exec "$REAL_DOCKER" "\$@"
+EOF
+chmod +x "$LSTUB/docker"
+# dlogin DIR SUBCOMMAND ANSWERS: runs `crb dashboard SUBCOMMAND` against the stub.
+dlogin() {
+  local dir=$1 sub=$2 answers=$3
+  : >"$WORK/docker.log"
+  (cd "$dir" && printf '%b' "$answers" | DOCKER_LOG="$WORK/docker.log" STUB_DIR="$WORK/answers" CRB_WAIT_S=0 PATH="$LSTUB:$PATH" "$SCRIPT" dashboard "$sub") >"$WORK/out" 2>&1
+  echo $? >"$WORK/rc"
+}
+answer() { printf '%s\n' "$2" >"$WORK/answers/$1"; }
+enroll_answer() { answer enroll "{\"passkeys\":$1,\"secret\":\"S3cret_-x\",\"minutes\":10,\"url\":\"$2\",\"auth\":\"${3:-on}\"}"; }
+
+echo "Dashboard login: first passkey"
+D="$WORK/t-dash"
+answer ps "0123abcd"; enroll_answer 0 "https://crb.example.org"
+cp "$D/.env" "$WORK/env.before"
+dlogin "$D" login 'nonsense\n'
+check "input ends after a bad address: non-zero, .env untouched, no link" '[ "$(rc)" -ne 0 ] && cmp -s "$D/.env" "$WORK/env.before" && ! out | grep -q "#enroll=" && ! dlog | grep -q "compose up"'
+dlogin "$D" login 'https://crb.example.org\n\nn\n'
+check "declined: nothing changed, no link" '[ "$(rc)" -eq 0 ] && out | grep -q "nichts geändert" && cmp -s "$D/.env" "$WORK/env.before" && ! out | grep -q "#enroll=" && ! dlog | grep -q "compose exec"'
+dlogin "$D" login 'https://crb.example.org\n\ny\n'
+check "exit 0" '[ "$(rc)" -eq 0 ] || { out; false; }'
+check "address in .env, no proxy line, token kept" 'grep -qx "CRB_DASHBOARD_URL=https://crb.example.org" "$D/.env" && ! grep -q CRB_DASHBOARD_PROXY "$D/.env" && grep -q "^CRB_STATUS_TOKEN=$TOKEN$" "$D/.env"'
+check "dashboard recreated, then the link with its lifetime" 'dlog | grep -q "docker compose up -d crb-dashboard" && out | grep -q "^   https://crb.example.org/#enroll=S3cret_-x$" && out | grep -q "10 Minuten gültig"'
+check "the running dashboard gets the address" '(cd "$D" && docker compose config crb-dashboard) | grep -q "CRB_DASHBOARD_URL: https://crb.example.org"'
+
+echo "Dashboard login: addresses that are not an https origin are asked again"
+cp "$WORK/env.before" "$D/.env"
+dlogin "$D" login 'http://crb.example.org\nhttps://crb.example.org/dash\ncrb.example.org\nhttps://crb.example.org/\nproxy.example\n10.0.5.2, 10.0.6.0/24\ny\n'
+check "three address hints, one proxy hint, then accepted" '[ "$(rc)" -eq 0 ] && [ "$(out | grep -c "mit https:// und ohne Pfad")" -eq 3 ] && [ "$(out | grep -c "IP-Adressen oder Bereiche")" -eq 1 ]'
+check "address without the trailing slash, proxy list as given" 'grep -qx "CRB_DASHBOARD_URL=https://crb.example.org" "$D/.env" && grep -qx "CRB_DASHBOARD_PROXY=10.0.5.2, 10.0.6.0/24" "$D/.env"'
+dlogin "$D" login ''
+check "a second run replaces nothing in .env" '[ "$(grep -c "^CRB_DASHBOARD_URL=" "$D/.env")" -eq 1 ]'
+
+echo "Dashboard login: further device"
+enroll_answer 1 "https://crb.example.org"
+cp "$D/.env" "$WORK/env.before"
+dlogin "$D" login ''
+check "no question, nothing recreated, new link, one passkey named" '[ "$(rc)" -eq 0 ] && ! out | grep -q "Öffentliche Adresse" && ! dlog | grep -q "compose up" && out | grep -q "#enroll=S3cret_-x" && out | grep -q "Passkeys bisher: 1" && cmp -s "$D/.env" "$WORK/env.before"'
+
+echo "Dashboard login: a dashboard that does not run with the address gives no link"
+enroll_answer 1 ""
+dlogin "$D" login ''
+check "non-zero, cause named, no link" '[ "$(rc)" -ne 0 ] && out | grep -q "nicht übernommen" && ! out | grep -q "#enroll="'
+enroll_answer 1 "https://crb.example.org" off
+dlogin "$D" login ''
+check "login switched off: non-zero, says so, no link" '[ "$(rc)" -ne 0 ] && out | grep -q "CRB_DASHBOARD_AUTH=off" && ! out | grep -q "#enroll="'
+sed -i.bak "s#^CRB_DASHBOARD_URL=.*#CRB_DASHBOARD_URL=crb.example.org#" "$D/.env"; rm -f "$D/.env.bak"
+dlogin "$D" login ''
+check "a broken address in .env is reported, not used" '[ "$(rc)" -ne 0 ] && out | grep -q "CRB_DASHBOARD_URL in .env" && ! dlog | grep -q "compose exec"'
+cp "$WORK/env.before" "$D/.env"
+
+echo "Dashboard logout and reset"
+answer logout '{"sessions":2}'; answer reset '{"passkeys":1,"sessions":2}'
+dlogin "$D" logout ''
+check "logout: says how many sessions ended, passkeys stay" '[ "$(rc)" -eq 0 ] && out | grep -q "2 Sitzung(en) beendet" && dlog | grep -q "compose exec -T crb-dashboard node server/admin.js logout"'
+dlogin "$D" reset '\n'
+check "reset declined with Enter: nothing removed" '[ "$(rc)" -eq 0 ] && out | grep -q "nichts geändert" && ! dlog | grep -q "compose exec"'
+dlogin "$D" reset 'y\n'
+check "reset confirmed: counts shown, next step named" '[ "$(rc)" -eq 0 ] && out | grep -q "1 Passkey(s) und 2 Sitzung(en) entfernt" && out | grep -q "./crb dashboard login" && dlog | grep -q "admin.js reset"'
+
+echo "Dashboard login: dashboard not running or not there"
+: >"$WORK/answers/ps"
+for sub in login logout reset; do
+  dlogin "$D" "$sub" 'y\n'
+  check "$sub: says it is not running and how to start it, changes nothing" '[ "$(rc)" -ne 0 ] && out | grep -q "läuft nicht" && out | grep -q "docker compose up -d crb-dashboard" && ! out | grep -q "#enroll=" && ! dlog | grep -q "compose exec\|compose up" && cmp -s "$D/.env" "$WORK/env.before"'
+done
+answer ps "0123abcd"
+cp "$WORK/dash.old" "$DF"
+dlogin "$D" login ''
+check "service file without the variables: points to crb update" '[ "$(rc)" -ne 0 ] && out | grep -q "./crb update" && ! dlog | grep -q "compose exec"'
+cp "$WORK/dash.new" "$DF"
+E="$WORK/t-nodash"; mkdir -p "$E"
+run "$E" 'n1\n\n\n\n\n\n\n\ny\n' "$REPO"
+dlogin "$E" login ''
+check "no dashboard service: says so" '[ "$(rc)" -ne 0 ] && out | grep -q "noch nicht angelegt" && out | grep -q "./crb dashboard"'
 
 echo "Refuses root and old Compose"
 FAKE="$WORK/fake"; mkdir -p "$FAKE"

@@ -1,15 +1,25 @@
 // SQLite storage: raw events (idempotent by box+seq), per-session and per-box
-// state updated on ingest, pruning.
+// state updated on ingest, pruning, and the login's passkeys, sessions, and
+// enrollment link.
+import { createHash, randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 const EVENT_RETENTION_DAYS = 7;
 const SESSION_RETENTION_DAYS = 90;
+export const LOGIN_DAYS = 30;
+export const ENROLL_MINUTES = 10;
+const TOUCH_EVERY_MS = 60 * 1000;
+
+/** Cookie values and link secrets are stored as this hash only. */
+const sha256 = (value) => createHash('sha256').update(String(value)).digest('hex');
+const newSecret = () => randomBytes(32).toString('base64url');
 
 export function openDb(file) {
   const db = new DatabaseSync(file);
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
+    PRAGMA busy_timeout = 3000;
     CREATE TABLE IF NOT EXISTS events (
       box TEXT NOT NULL, run TEXT NOT NULL DEFAULT '', seq INTEGER NOT NULL, session TEXT, ts TEXT NOT NULL,
       type TEXT NOT NULL, json TEXT NOT NULL, received TEXT NOT NULL,
@@ -32,6 +42,16 @@ export function openDb(file) {
     CREATE TABLE IF NOT EXISTS boxes (
       name TEXT PRIMARY KEY, phase TEXT, last_heartbeat TEXT, image TEXT,
       claude_version TEXT, spawn TEXT, uptime_s INTEGER, git_json TEXT, updated TEXT
+    );
+    CREATE TABLE IF NOT EXISTS auth_passkeys (
+      id TEXT PRIMARY KEY, public_key BLOB NOT NULL, counter INTEGER NOT NULL DEFAULT 0,
+      transports TEXT, label TEXT, created TEXT NOT NULL, last_used TEXT
+    );
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+      hash TEXT PRIMARY KEY, passkey TEXT NOT NULL, created TEXT NOT NULL, last_used TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS auth_enroll (
+      id INTEGER PRIMARY KEY CHECK (id = 1), hash TEXT NOT NULL, issued TEXT NOT NULL
     );
   `);
   // Columns added after the first release, for databases created before them.
@@ -190,11 +210,104 @@ export class Store {
     const cutSessions = new Date(now.getTime() - SESSION_RETENTION_DAYS * 86400000).toISOString();
     const a = this.db.prepare('DELETE FROM events WHERE ts < ?').run(cutEvents).changes;
     const b = this.db.prepare('DELETE FROM sessions WHERE COALESCE(last_activity, last, started) < ?').run(cutSessions).changes;
+    this.db.prepare('DELETE FROM auth_sessions WHERE last_used < ?').run(loginCut(now));
+    this.db.prepare('DELETE FROM auth_enroll WHERE issued < ?').run(enrollCut(now));
     return { events: a, sessions: b };
+  }
+
+  // --- Login ---------------------------------------------------------------
+
+  passkeyCount() {
+    return this.db.prepare('SELECT COUNT(*) AS c FROM auth_passkeys').get().c;
+  }
+
+  /** @returns {{id: string, publicKey: Uint8Array, counter: number, transports: string[]|undefined}|null} */
+  passkey(id) {
+    const r = this.db.prepare('SELECT * FROM auth_passkeys WHERE id = ?').get(id);
+    if (!r) return null;
+    return { id: r.id, publicKey: new Uint8Array(r.public_key), counter: r.counter, transports: r.transports ? JSON.parse(r.transports) : undefined, label: r.label };
+  }
+
+  addPasskey({ id, publicKey, counter = 0, transports, label = null }, now = new Date()) {
+    this.db.prepare('INSERT INTO auth_passkeys (id, public_key, counter, transports, label, created) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(id, publicKey, counter, transports ? JSON.stringify(transports) : null, label, now.toISOString());
+  }
+
+  usedPasskey(id, counter, now = new Date()) {
+    this.db.prepare('UPDATE auth_passkeys SET counter = ?, last_used = ? WHERE id = ?').run(counter, now.toISOString(), id);
+  }
+
+  /** Starts a session and returns the cookie value; only its hash is stored. */
+  createSession(passkey, now = new Date()) {
+    const value = newSecret();
+    this.db.prepare('INSERT INTO auth_sessions (hash, passkey, created, last_used) VALUES (?, ?, ?, ?)')
+      .run(sha256(value), passkey, now.toISOString(), now.toISOString());
+    return value;
+  }
+
+  /**
+   * The session of a cookie value, or null when it is unknown, unused for
+   * LOGIN_DAYS, or its passkey is gone. `renewed` says that last_used was
+   * written, so the caller sends the cookie again.
+   */
+  session(value, now = new Date()) {
+    if (typeof value !== 'string' || !value) return null;
+    const hash = sha256(value);
+    const r = this.db.prepare(`SELECT s.hash, s.passkey, s.last_used FROM auth_sessions s
+      JOIN auth_passkeys p ON p.id = s.passkey WHERE s.hash = ? AND s.last_used >= ?`).get(hash, loginCut(now));
+    if (!r) return null;
+    const renewed = now.getTime() - Date.parse(r.last_used) >= TOUCH_EVERY_MS;
+    if (renewed) this.db.prepare('UPDATE auth_sessions SET last_used = ? WHERE hash = ?').run(now.toISOString(), hash);
+    return { hash, passkey: r.passkey, renewed };
+  }
+
+  /** Whether the session with this hash still exists and is within its lifetime; does not count as a use. */
+  sessionAlive(hash, now = new Date()) {
+    return Boolean(this.db.prepare('SELECT 1 FROM auth_sessions WHERE hash = ? AND last_used >= ?').get(hash, loginCut(now)));
+  }
+
+  endSession(value) {
+    return this.db.prepare('DELETE FROM auth_sessions WHERE hash = ?').run(sha256(value)).changes;
+  }
+
+  endAllSessions(now = new Date()) {
+    this.db.prepare('DELETE FROM auth_sessions WHERE last_used < ?').run(loginCut(now));
+    return this.db.prepare('DELETE FROM auth_sessions').run().changes;
+  }
+
+  /** Removes every passkey, session, and the enrollment link. */
+  resetAuth(now = new Date()) {
+    const sessions = this.endAllSessions(now);
+    const passkeys = this.db.prepare('DELETE FROM auth_passkeys').run().changes;
+    this.db.prepare('DELETE FROM auth_enroll').run();
+    return { passkeys, sessions };
+  }
+
+  /** Issues the enrollment secret; a link issued before stops working. */
+  issueEnroll(now = new Date()) {
+    const secret = newSecret();
+    this.db.prepare('INSERT INTO auth_enroll (id, hash, issued) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET hash = excluded.hash, issued = excluded.issued')
+      .run(sha256(secret), now.toISOString());
+    return secret;
+  }
+
+  /** 'ok', 'expired', or 'unknown' (never issued, replaced, or already used). */
+  enrollState(secret, now = new Date()) {
+    if (typeof secret !== 'string' || !secret) return 'unknown';
+    const r = this.db.prepare('SELECT issued FROM auth_enroll WHERE id = 1 AND hash = ?').get(sha256(secret));
+    if (!r) return 'unknown';
+    return r.issued >= enrollCut(now) ? 'ok' : 'expired';
+  }
+
+  spendEnroll() {
+    this.db.prepare('DELETE FROM auth_enroll').run();
   }
 
   close() { this.db.close(); }
 }
+
+const loginCut = (now) => new Date(now.getTime() - LOGIN_DAYS * 86400000).toISOString();
+const enrollCut = (now) => new Date(now.getTime() - ENROLL_MINUTES * 60000).toISOString();
 
 function label(text) {
   if (typeof text !== 'string') return null;

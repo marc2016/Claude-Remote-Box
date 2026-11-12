@@ -1,5 +1,6 @@
 # Status dashboard for claude-remote-box.
-# Stage 1 builds the web app; the runtime stage holds only the server and web/dist.
+# Stage 1 builds the web app; the runtime stage holds the server, its production
+# dependencies, and web/dist.
 FROM node:26-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -17,7 +18,9 @@ ENV NODE_ENV=production \
     DATA_DIR=/data \
     WEB_DIR=/app/web/dist
 WORKDIR /app
-COPY package.json ./
+COPY package.json package-lock.json ./
+# Production dependencies only: the WebAuthn library for the login.
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY shared ./shared
 COPY server ./server
 COPY --from=build /app/web/dist ./web/dist

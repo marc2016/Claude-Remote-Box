@@ -1,9 +1,11 @@
 import type { BoxesResponse, TimelineEvent } from '@shared/types';
+import { UnauthorizedError } from '@/lib/auth';
 
 export const PAGE_SIZE = 200;
 
 export async function fetchBoxes(): Promise<BoxesResponse> {
   const r = await fetch('/api/boxes', { cache: 'no-store' });
+  if (r.status === 401) throw new UnauthorizedError();
   if (!r.ok) throw new Error(`boxes: ${r.status}`);
   return r.json();
 }
@@ -13,6 +15,7 @@ export async function fetchTimeline(session: string, limit = PAGE_SIZE, before?:
   const q = new URLSearchParams({ limit: String(limit) });
   if (before != null) q.set('before', String(before));
   const r = await fetch(`/api/sessions/${encodeURIComponent(session)}/events?${q}`, { cache: 'no-store' });
+  if (r.status === 401) throw new UnauthorizedError();
   if (!r.ok) throw new Error(`events: ${r.status}`);
   const j = await r.json();
   return j.events as TimelineEvent[];

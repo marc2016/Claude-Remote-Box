@@ -4,6 +4,8 @@
 #                         empty directory)
 #   ./crb update          updates this script, the image, and every project
 #   ./crb dashboard       adds the status dashboard and wires every box to it
+#   ./crb dashboard login   prints a one-time link that creates a passkey
+#   ./crb dashboard logout  ends every session; reset removes every passkey
 #   ./crb git [project]   menu: project, branch, action. Without a terminal
 #                         or with --list: main and every branch against origin
 #   ./crb git sync [project]  fast-forwards and pushes them (never forces)
@@ -48,6 +50,9 @@ usage() {
   echo "Usage: ./crb add [git-url]   Projekt hinzufügen"
   echo "       ./crb update          Skript, Image und Projekte aktualisieren"
   echo "       ./crb dashboard       Status-Dashboard anlegen und Boxen anbinden"
+  echo "       ./crb dashboard login   Anmelde-Link für einen neuen Passkey erzeugen"
+  echo "       ./crb dashboard logout  alle Geräte abmelden"
+  echo "       ./crb dashboard reset   alle Passkeys und Sitzungen löschen"
   echo "       ./crb git [projekt]   Git-Menü: Projekt, Branch, Aktion (ohne Terminal: Übersicht)"
   echo "       ./crb git --list      Übersicht: main und Branches gegen origin"
   echo "       ./crb git sync [projekt]  mit origin abgleichen: pull und push"
@@ -221,6 +226,180 @@ status_lines_missing() {
 add_status_lines() {
   box_has_env CRB_STATUS_URL || box_env_line CRB_STATUS_URL '"http://crb-dashboard:8080/api/ingest"'
   box_has_env CRB_STATUS_TOKEN || box_env_line CRB_STATUS_TOKEN '"${CRB_STATUS_TOKEN}"'
+}
+
+# --- Dashboard login ---------------------------------------------------------
+
+DASHBOARD_FILE=services/crb-dashboard.yaml
+DASHBOARD_LOGIN_KEYS="CRB_DASHBOARD_URL CRB_DASHBOARD_PROXY CRB_DASHBOARD_AUTH CRB_DASHBOARD_REMOTE_INGEST"
+
+# dashboard_env_missing: which login variables the dashboard service file lacks.
+dashboard_env_missing() {
+  local key
+  for key in $DASHBOARD_LOGIN_KEYS; do
+    grep -qE "^[[:space:]]+$key:" "$DASHBOARD_FILE" || echo "$key"
+  done
+}
+
+# dashboard_env_line KEY: the line that passes KEY from .env, empty by default.
+# shellcheck disable=SC2016
+dashboard_env_line() { printf '      %s: "${%s:-}"\n' "$1" "$1"; }
+
+# dashboard_by_crb: the service file was written by crb, so its layout is known.
+dashboard_by_crb() { head -n 1 "$DASHBOARD_FILE" | grep -q '^# Created by crb\.'; }
+
+# add_dashboard_env: adds the missing login variables below CRB_STATUS_TOKEN
+# and changes no other line.
+add_dashboard_env() {
+  local lines="" key tmp
+  for key in $(dashboard_env_missing); do lines="$lines$(dashboard_env_line "$key")"$'\n'; done
+  [ -n "$lines" ] || return 0
+  tmp=$(mktemp)
+  # shellcheck disable=SC2016
+  LINES_TO_ADD=${lines%$'\n'} awk '{ print } !done && /^      CRB_STATUS_TOKEN:/ { print ENVIRON["LINES_TO_ADD"]; done = 1 }' "$DASHBOARD_FILE" > "$tmp"
+  cat "$tmp" > "$DASHBOARD_FILE"
+  rm -f "$tmp"
+}
+
+# env_get KEY: the value of KEY in .env, or empty.
+env_get() {
+  [ -f .env ] || return 0
+  sed -n "s/^$1=//p" .env | tail -n 1
+}
+
+# env_set KEY VALUE: sets KEY in .env, replacing an existing line.
+env_set() {
+  local tmp
+  if [ -f .env ] && grep -q "^$1=" .env; then
+    tmp=$(mktemp)
+    KEY=$1 VALUE=$2 awk 'index($0, ENVIRON["KEY"] "=") == 1 { print ENVIRON["KEY"] "=" ENVIRON["VALUE"]; next } { print }' .env > "$tmp"
+    cat "$tmp" > .env
+    rm -f "$tmp"
+  else
+    if [ -f .env ] && [ -n "$(tail -c 1 .env)" ]; then echo >> .env; fi
+    printf '%s=%s\n' "$1" "$2" >> .env
+  fi
+}
+
+# public_url VALUE: prints the address as an origin when it is https://host[:port]
+# (or http://localhost[:port] for development), fails otherwise.
+public_url() {
+  local v=${1%/}
+  if [[ "$v" =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ || "$v" =~ ^http://localhost(:[0-9]{1,5})?$ ]]; then
+    printf '%s\n' "$v"
+  else
+    return 1
+  fi
+}
+
+# json_field JSON KEY: the value of a string or number field of one-line JSON
+# as printed by the dashboard's admin script (no nesting, no escapes).
+json_field() {
+  printf '%s\n' "$1" | sed -n "s/.*\"$2\":\"\{0,1\}\([^\",}]*\).*/\1/p"
+}
+
+# dashboard_admin COMMAND: runs the admin script in the dashboard container and
+# prints its JSON line.
+dashboard_admin() {
+  docker compose exec -T crb-dashboard node server/admin.js "$1" </dev/null
+}
+
+# dashboard_ready: the service file exists, has the login variables, and the
+# container runs. Dies with the cause otherwise; changes nothing.
+dashboard_ready() {
+  check_host
+  [ -f compose.yaml ] || die "Hier liegt keine compose.yaml. Bitte im Ordner der Installation ausführen."
+  [ -f "$DASHBOARD_FILE" ] || die "Das Dashboard ist noch nicht angelegt. Zuerst: ./crb dashboard"
+  if [ -n "$(dashboard_env_missing)" ]; then
+    die "$DASHBOARD_FILE kennt die Login-Variablen noch nicht. Zuerst: ./crb update"
+  fi
+  if [ -z "$(docker compose ps --status running -q crb-dashboard 2>/dev/null)" ]; then
+    die "Das Dashboard läuft nicht. Starten mit: docker compose up -d crb-dashboard"
+  fi
+}
+
+cmd_dashboard_login() {
+  dashboard_ready
+  local url proxy="" out secret count got i
+  url=$(env_get CRB_DASHBOARD_URL)
+  if [ -n "$url" ] && ! url=$(public_url "$url"); then
+    die "CRB_DASHBOARD_URL in .env ist keine Adresse der Form https://name.example.org. Bitte korrigieren oder die Zeile löschen."
+  fi
+  if [ -z "$url" ]; then
+    echo "Das Dashboard braucht einmal seine öffentliche Adresse. Passkeys gelten nur für diese Adresse."
+    while :; do
+      ask url "Öffentliche Adresse (https://name.example.org)"
+      if url=$(public_url "$url"); then break; fi
+      echo "   Bitte eine Adresse mit https:// und ohne Pfad angeben, zum Beispiel https://crb.example.org"
+    done
+    while :; do
+      ask proxy "Adresse des Reverse Proxys, wie das Dashboard sie sieht (leer: später in .env als CRB_DASHBOARD_PROXY)"
+      [[ "$proxy" =~ ^[0-9A-Fa-f:.,/\ ]*$ ]] && break
+      echo "   Bitte IP-Adressen oder Bereiche angeben, mit Komma getrennt, zum Beispiel 10.0.5.2 oder 10.0.5.0/24"
+    done
+    echo ""
+    echo "📋 Zusammenfassung"
+    echo "  .env:       CRB_DASHBOARD_URL=$url"
+    [ -z "$proxy" ] || echo "  .env:       CRB_DASHBOARD_PROXY=$proxy"
+    echo "  Dashboard:  wird neu gestartet, damit es die Adresse übernimmt"
+    echo ""
+    if ! confirm "Eintragen und das Dashboard neu starten?"; then
+      echo "Abgebrochen, nichts geändert."
+      exit 0
+    fi
+    env_set CRB_DASHBOARD_URL "$url"
+    [ -z "$proxy" ] || env_set CRB_DASHBOARD_PROXY "$proxy"
+    docker compose up -d crb-dashboard || die "docker compose up -d crb-dashboard ist fehlgeschlagen."
+  fi
+
+  # After a recreate the container needs a moment; the link must come from a
+  # dashboard that runs with this address.
+  out=""; got=""
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if out=$(dashboard_admin enroll 2>/dev/null); then
+      got=$(json_field "$out" url)
+      [ "$got" = "$url" ] && break
+    fi
+    out=""
+    sleep "${CRB_WAIT_S:-1}"
+  done
+  if [ -z "$out" ]; then
+    die "Das Dashboard hat die Adresse $url nicht übernommen (meldet: ${got:-nichts}). Prüfen: docker compose logs crb-dashboard"
+  fi
+  if [ "$(json_field "$out" auth)" = off ]; then
+    die "Der Login ist ausgeschaltet (CRB_DASHBOARD_AUTH=off in .env). Zeile löschen und: docker compose up -d crb-dashboard"
+  fi
+  secret=$(json_field "$out" secret)
+  count=$(json_field "$out" passkeys)
+  [ -n "$secret" ] || die "Das Dashboard hat keinen Link geliefert: $out"
+  echo ""
+  echo "🔑 Anmelde-Link, $(json_field "$out" minutes) Minuten gültig, einmal verwendbar:"
+  echo ""
+  echo "   $url/#enroll=$secret"
+  echo ""
+  echo "Auf dem Gerät öffnen, das sich anmelden soll, und dort den Passkey anlegen."
+  echo "Passkeys bisher: ${count:-0}. Ein früherer, unbenutzter Link gilt nicht mehr."
+}
+
+cmd_dashboard_logout() {
+  dashboard_ready
+  local out n
+  out=$(dashboard_admin logout) || die "Abmelden ist fehlgeschlagen. Prüfen: docker compose logs crb-dashboard"
+  n=$(json_field "$out" sessions)
+  echo "✨ ${n:-0} Sitzung(en) beendet. Die Passkeys bleiben gültig."
+}
+
+cmd_dashboard_reset() {
+  dashboard_ready
+  local out
+  echo "Löscht alle Passkeys und meldet alle Geräte ab. Danach ist das Dashboard gesperrt,"
+  echo "bis mit ./crb dashboard login ein neuer Passkey angelegt ist."
+  if ! confirm "Alle Passkeys und Sitzungen löschen?"; then
+    echo "Abgebrochen, nichts geändert."
+    exit 0
+  fi
+  out=$(dashboard_admin reset) || die "Zurücksetzen ist fehlgeschlagen. Prüfen: docker compose logs crb-dashboard"
+  echo "✨ $(json_field "$out" passkeys) Passkey(s) und $(json_field "$out" sessions) Sitzung(en) entfernt. Neu anlegen: ./crb dashboard login"
 }
 
 # --- Checks shared by both subcommands ---------------------------------------
@@ -651,6 +830,24 @@ cmd_update() {
     fi
   fi
 
+  local plan_login=0 missing_login=""
+  if [ "$layout" = services ] && [ -f "$DASHBOARD_FILE" ]; then
+    missing_login=$(dashboard_env_missing | tr '\n' ' ')
+    if [ -n "$missing_login" ]; then
+      echo "   Das Dashboard hat jetzt einen Login mit Passkeys. $DASHBOARD_FILE fehlt: $missing_login"
+      echo "   Nach dem Update ist das Dashboard gesperrt, bis mit ./crb dashboard login ein Passkey angelegt ist."
+      if ! dashboard_by_crb; then
+        echo "   Die Datei ist nicht von crb angelegt und bleibt unverändert. Unter environment: eintragen:"
+        local key
+        for key in $missing_login; do dashboard_env_line "$key" | sed 's/^/   /'; done
+      elif confirm_yes "   Login-Variablen in $DASHBOARD_FILE eintragen?"; then
+        plan_login=1
+      else
+        echo "   Ohne diese Zeilen lässt sich der Login nicht über .env einstellen."
+      fi
+    fi
+  fi
+
   # Parallel arrays (bash 3.2 has no associative arrays).
   local -a names=() modes=() phones=()
   local f n permission current extra has_file
@@ -710,6 +907,11 @@ cmd_update() {
     [ "$plan_tag" -eq 1 ] || changed_files+=(box.yaml)
     for i in "${!names[@]}"; do changed_services+=("${names[$i]}"); done
   fi
+  if [ "$plan_login" -eq 1 ]; then
+    echo "  $DASHBOARD_FILE:  $missing_login"
+    changed_files+=("$DASHBOARD_FILE")
+    changed_services+=(crb-dashboard)
+  fi
   for i in "${!names[@]}"; do
     n=${names[$i]}
     if [ -n "${modes[$i]}" ]; then
@@ -754,6 +956,10 @@ cmd_update() {
       ensure_status_token
       add_status_lines
       echo "   box.yaml: $missing_status"
+    fi
+    if [ "$plan_login" -eq 1 ]; then
+      add_dashboard_env
+      echo "   $DASHBOARD_FILE: $missing_login"
     fi
     for i in "${!names[@]}"; do
       n=${names[$i]}
@@ -805,10 +1011,17 @@ cmd_update() {
 # =============================================================================
 
 cmd_dashboard() {
+  case "${1-}" in
+    "") ;;
+    login) cmd_dashboard_login; return ;;
+    logout) cmd_dashboard_logout; return ;;
+    reset) cmd_dashboard_reset; return ;;
+    *) usage >&2; exit 64 ;;
+  esac
   banner "Dashboard hinzufügen"
   check_host
   [ -f compose.yaml ] || die "Hier liegt keine compose.yaml. Bitte im Ordner der Installation ausführen."
-  local service_file=services/crb-dashboard.yaml
+  local service_file=$DASHBOARD_FILE
   if [ -f "$service_file" ]; then
     echo "   $service_file ist schon vorhanden, nichts zu tun."
     echo "   Boxen anbinden oder prüfen: ./crb update"
@@ -841,7 +1054,8 @@ cmd_dashboard() {
   echo ""
   echo "📋 Zusammenfassung"
   echo "  Dashboard:    $service_file (Image $CRB_DASHBOARD_IMAGE)"
-  echo "  Port:         \${CRB_DASHBOARD_BIND:-127.0.0.1:8080} -> 8080 (in .env änderbar, kein Login!)"
+  echo "  Port:         \${CRB_DASHBOARD_BIND:-127.0.0.1:8080} -> 8080 (in .env änderbar)"
+  echo "  Login:        Passkeys; der erste wird danach mit ./crb dashboard login angelegt"
   echo "  Token:        CRB_STATUS_TOKEN in .env ($token_state)"
   if [ -n "$missing_status" ]; then
     echo "  box.yaml:     $missing_status"
@@ -868,7 +1082,8 @@ cmd_dashboard() {
   add_status_lines
   cat > "$service_file" <<EOF
 # Created by crb. The status dashboard: one card per box, fed by the boxes'
-# status reports. No login: keep the port on a private network or a VPN.
+# status reports. Login with passkeys: ./crb dashboard login. The CRB_DASHBOARD_*
+# values come from .env, see README, "Status dashboard".
 services:
   crb-dashboard:
     image: ${CRB_DASHBOARD_IMAGE}
@@ -878,6 +1093,10 @@ services:
     security_opt: [no-new-privileges:true]
     environment:
       CRB_STATUS_TOKEN: "\${CRB_STATUS_TOKEN}"
+      CRB_DASHBOARD_URL: "\${CRB_DASHBOARD_URL:-}"
+      CRB_DASHBOARD_PROXY: "\${CRB_DASHBOARD_PROXY:-}"
+      CRB_DASHBOARD_AUTH: "\${CRB_DASHBOARD_AUTH:-}"
+      CRB_DASHBOARD_REMOTE_INGEST: "\${CRB_DASHBOARD_REMOTE_INGEST:-}"
     ports:
       - "\${CRB_DASHBOARD_BIND:-127.0.0.1:8080}:8080"
     volumes:
@@ -909,7 +1128,9 @@ EOF
   echo ""
   echo "✨ Dashboard ist angelegt. Weiter mit:"
   echo "   docker compose up -d        (startet das Dashboard und bindet die Boxen an)"
-  echo "   http://127.0.0.1:8080       (oder CRB_DASHBOARD_BIND in .env, siehe README)"
+  echo "   ./crb dashboard login       (legt den ersten Passkey an; bis dahin ist die Seite gesperrt)"
+  echo "   Der Port liegt auf 127.0.0.1:8080 (CRB_DASHBOARD_BIND in .env); für die Anmeldung"
+  echo "   braucht das Dashboard eine https-Adresse über einen Reverse Proxy, siehe README."
 }
 
 # =============================================================================

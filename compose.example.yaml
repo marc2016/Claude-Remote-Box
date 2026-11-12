@@ -46,7 +46,9 @@ services:
   #     - another-project-browsers:/home/node/.cache/ms-playwright
 
   # Status dashboard (see README, "Status dashboard"). Needs CRB_STATUS_TOKEN
-  # in .env and the two CRB_STATUS_* lines on every box above.
+  # in .env and the two CRB_STATUS_* lines on every box above. The page is
+  # locked until a passkey exists: set CRB_DASHBOARD_URL in .env, then
+  # docker compose exec crb-dashboard node server/admin.js enroll
   # crb-dashboard:
   #   image: ghcr.io/marc2016/claude-remote-box-dashboard:latest
   #   restart: unless-stopped
@@ -55,6 +57,10 @@ services:
   #   security_opt: [no-new-privileges:true]
   #   environment:
   #     CRB_STATUS_TOKEN: "${CRB_STATUS_TOKEN}"
+  #     CRB_DASHBOARD_URL: "${CRB_DASHBOARD_URL:-}"                      # public https address; passkeys are bound to it
+  #     CRB_DASHBOARD_PROXY: "${CRB_DASHBOARD_PROXY:-}"                  # address of the reverse proxy
+  #     CRB_DASHBOARD_AUTH: "${CRB_DASHBOARD_AUTH:-}"                    # off: no login (private network only)
+  #     CRB_DASHBOARD_REMOTE_INGEST: "${CRB_DASHBOARD_REMOTE_INGEST:-}"  # 1: accept box reports through the proxy
   #   ports:
   #     - "${CRB_DASHBOARD_BIND:-127.0.0.1:8080}:8080"
   #   volumes:

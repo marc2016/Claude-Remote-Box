@@ -176,6 +176,10 @@ To reset it: `docker compose down another-project && docker volume rm <stack>_an
 | `CRB_STATUS_URL` | (empty) | Status endpoint, `http://` or `https://`. When set, the box reports its phase, a heartbeat, and its sessions' activity there, see "Status reporting". Empty: nothing is sent |
 | `CRB_STATUS_TOKEN` | (empty) | Bearer token sent with every status request; `crb dashboard` generates it into `.env` |
 | `CRB_DASHBOARD_BIND` | `127.0.0.1:8080` | Host address and port the dashboard is published on (in `.env`) |
+| `CRB_DASHBOARD_URL` | (empty) | Public address of the dashboard, an `https://` origin without a path (in `.env`). Passkeys are bound to its host name; `crb dashboard login` asks for it. Empty: the page stays locked |
+| `CRB_DASHBOARD_PROXY` | (empty) | Address of your reverse proxy as the dashboard sees it, or several addresses and CIDR ranges separated by commas (in `.env`). Only from there is `X-Forwarded-For` believed |
+| `CRB_DASHBOARD_AUTH` | (on) | `off` turns the login off (in `.env`): for a dashboard that stays on a private network |
+| `CRB_DASHBOARD_REMOTE_INGEST` | (empty) | `1` accepts box reports that arrive through a proxy (in `.env`): for boxes on another host |
 | `UID` / `GID` | `1000` | User the container runs as. Set them to your host user in `.env` so files in your project keep the right owner |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | (empty) | Git identity for commits made by Claude |
 
@@ -194,13 +198,65 @@ One page, made for the phone, with one card per box: status and phase, permissio
 ```sh
 ./crb dashboard        # adds the service and wires every box to it
 docker compose up -d   # starts the dashboard and recreates the boxes
+./crb dashboard login  # prints a one-time link that creates your passkey
 ```
 
 `crb dashboard` generates `CRB_STATUS_TOKEN` in `.env`, writes `services/crb-dashboard.yaml`, and adds `CRB_STATUS_URL` and `CRB_STATUS_TOKEN` to the `box` service in `box.yaml`. The dashboard keeps its SQLite database in a named volume (`crb-dashboard-data`): events for 7 days, session summaries for 90 days. It runs with the same hardening as a box and mounts nothing else: no Docker socket, no config directories, no workspaces. Its image is `ghcr.io/marc2016/claude-remote-box-dashboard`, released together with the box image under the same version.
 
-**Where it is reachable.** By default the port is bound to `127.0.0.1:8080` on the host, so only an SSH tunnel or a reverse proxy on that machine reaches it. Set `CRB_DASHBOARD_BIND` in `.env` to change that, for example `0.0.0.0:8080` for the LAN or the address of a VPN interface such as Tailscale. **There is no login yet.** Whoever reaches the page sees your prompts and Claude's replies. Keep it on a private network or behind a VPN; authentication is planned as the next step.
+### Signing in
 
-To see the dashboard with dummy data on any machine with Node 22.13+ (it needs `node:sqlite`), without boxes: `cd dashboard && npm install && npm run demo`, then open `http://127.0.0.1:8080`; `PORT=8091 npm run demo` if 8080 is taken. The demo shows one box in every state, including an animated Clawd per card. For development with hot reload, `npm run dev` starts the server, Vite and the seed together; open `http://localhost:5173`.
+The dashboard shows your prompts and Claude's replies, so it has a login. You sign in with a passkey: Face ID, a fingerprint, or the device PIN. There is no password and nothing to type.
+
+A passkey is created through a link that only the host can issue:
+
+```sh
+./crb dashboard login
+```
+
+The first run asks for the dashboard's public address (for example `https://crb.example.org`) and for the address of your reverse proxy, writes both to `.env`, and restarts the dashboard. It then prints a link that is valid for 10 minutes and works once. Open it on the device you want to sign in with and confirm creating the passkey; that device is signed in. Run the command again for every further device. A browser stays signed in for 30 days after its last use; "Abmelden" in the page ends that browser's session.
+
+```sh
+./crb dashboard logout   # signs out every device, passkeys stay
+./crb dashboard reset    # removes every passkey and session, asks first
+```
+
+Until a passkey exists the page shows no data, only the command above. Whoever can run `crb` in the installation directory can create a passkey, so the host is the root of trust; there is no recovery through the web. If a device is lost, run `reset` and create new passkeys.
+
+Passkeys are bound to the host name of `CRB_DASHBOARD_URL`. If that name changes, the old passkeys stop working: set the new address in `.env`, run `docker compose up -d crb-dashboard`, and create new ones with `./crb dashboard login`. In a single-file setup, set `CRB_DASHBOARD_URL` on the service yourself, run `docker compose exec crb-dashboard node server/admin.js enroll`, and open `<address>/#enroll=<secret>` with the secret it prints.
+
+### Publishing it through a reverse proxy
+
+Passkeys need HTTPS, and the dashboard itself speaks plain HTTP. Put a reverse proxy with a certificate in front of it:
+
+- **The proxy** terminates TLS for the public address and forwards to the dashboard's port. It has to set `X-Forwarded-For` (every common proxy does) and must not buffer responses of `/api/events`, which is a long-lived event stream. Do not forward `/api/ingest`: boxes report over the Compose network, and the dashboard answers `403` to an ingest request that a proxy forwarded.
+- **The port.** By default it is bound to `127.0.0.1:8080`, which is enough for a proxy on the same machine. For a proxy on another machine, set `CRB_DASHBOARD_BIND` in `.env` to an address that proxy can reach, for example `192.168.1.10:8080`, and let your firewall allow only the proxy to connect. Opening the port directly, as `http://host:8080`, shows a link to the public address and no data: signing in works only at the public address.
+- **`CRB_DASHBOARD_PROXY`.** Sign-in attempts are limited to 10 per minute and client. Without this setting every visitor behind the proxy counts as one client. If the value does not match, `docker compose logs crb-dashboard` names the address the dashboard sees for the proxy; depending on your Docker network setup that can be the bridge gateway instead of the proxy's own address.
+
+A minimal nginx server block:
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name crb.example.org;
+  # ssl_certificate ...; ssl_certificate_key ...;
+
+  location = /api/ingest { return 403; }
+  location / {
+    proxy_pass http://192.168.1.10:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+  }
+}
+```
+
+Once the dashboard is reachable from outside, the login and the proxy's TLS are all that stands between the internet and the stored prompts and replies. Publish it only when it runs a version with the login and a passkey exists.
+
+**Without the login.** `CRB_DASHBOARD_AUTH=off` in `.env` serves the page to everyone who reaches the port, as versions before the login did. Use it only on a private network or behind a VPN such as Tailscale, and never together with a public address.
+
+To see the dashboard with dummy data on any machine with Node 22.13+ (it needs `node:sqlite`), without boxes: `cd dashboard && npm install && npm run demo`, then open `http://127.0.0.1:8080`; `PORT=8091 npm run demo` if 8080 is taken. The demo shows one box in every state, including an animated Clawd per card. The demo and the development mode run with the login off. For development with hot reload, `npm run dev` starts the server, Vite and the seed together; open `http://localhost:5173`.
 
 Tap a card to open it: the card grows into a detail view with its information on the left and the conversation on the right (on a phone: information on top, conversation below), live, with your prompts as bubbles, Claude's replies as Markdown, and tool calls as compact lines that show "Freigabe ausstehend" while a session waits for you. The open box is in the URL (`#janus-note-vs`), so the back gesture closes it and a box can be linked. The session link on a card opens the session in the Claude app once the URL pattern is confirmed; until then the card offers the session id to copy. `./crb update` adds the two status variables to an installation that got the dashboard by hand. To remove the dashboard: delete `services/crb-dashboard.yaml`, its line in `compose.yaml`, and the two variables in `box.yaml`, then `docker compose up -d`.
 
@@ -212,7 +268,7 @@ What is sent, as JSON arrays of events with the box name, a timestamp, and a seq
 
 The data comes from a small watcher process in the container that reads the session transcripts Claude Code writes in the config directory. It only reads; sessions are not slowed down. Prompts and replies are truncated to 4000 characters. Sends time out after 2 s; while the endpoint is unreachable, events are kept in a spool (newest 500) and delivered in order afterwards.
 
-**Privacy:** your prompts and Claude's replies leave the box, to the host you configured. Use `https` or a private network when the endpoint is not on the same machine. The token only lets the endpoint tell your boxes apart from strangers; it does not encrypt anything. A receiver without a heartbeat for 90 s should treat the box as down.
+**Privacy:** your prompts and Claude's replies leave the box, to the host you configured. Use `https` or a private network when the endpoint is not on the same machine; a dashboard behind a reverse proxy accepts such reports only with `CRB_DASHBOARD_REMOTE_INGEST=1` in its `.env`. The token only lets the endpoint tell your boxes apart from strangers; it does not encrypt anything. A receiver without a heartbeat for 90 s should treat the box as down.
 
 ## Screenshots
 
@@ -259,6 +315,7 @@ One command brings the whole installation up to date, and it is safe to run at a
 
 1. It fetches the newest `crb` from this repository and, if it differs, replaces itself and starts over with the new version. Set `CRB_SOURCE` to a URL or a local path to fetch from somewhere else. GitHub may serve a copy that is a few minutes old right after a push.
 2. If `box.yaml` pins a release tag, it offers to switch to `latest`.
+   If the dashboard service file was written before the dashboard had a login, it offers to add the `CRB_DASHBOARD_*` variables to it. After such an update the dashboard is locked until you create a passkey with `./crb dashboard login`, see "Signing in".
 3. For every project in `services/`, it shows the current permission mode and phone-mode state and asks only about what is missing: the permission mode when none is set (Enter keeps `default`) and the phone-mode file when there is none. Projects created by hand, and single-file setups with services in `compose.yaml`, are not edited; the command prints what to add where.
 4. It shows a summary and changes nothing before you confirm. If `docker compose config -q` fails afterwards, the changed files are restored.
 5. It runs `docker compose pull`. Services whose environment changed need `docker compose up -d <name>` to pick it up, which ends their running sessions, so the command asks first (default no) and prints the command for later.
@@ -377,7 +434,11 @@ What the setup protects:
 - No inbound ports. Remote Control works over outbound HTTPS.
 - In `default` mode, shell commands that are not pre-approved need your confirmation on the phone. In `acceptEdits` mode, file edits inside the project run without asking, commands still ask.
 
+- The dashboard shows data only to a browser that signed in with a passkey, and it has no password that could be guessed or phished. Its container mounts only its own data volume.
+
 What it does **not** protect (yet):
+
+- **The dashboard login is one layer.** Behind a reverse proxy it is the only thing between the internet and your stored prompts and replies. Anyone with shell access to the host can create a passkey, and anyone who reaches the port without the proxy talks plain HTTP to it, so keep that port reachable for the proxy only. The dashboard can only show; it cannot approve, pull, or push.
 
 - **`./crb git sync` publishes what Claude committed.** The push runs on the host with your credentials and without a review step, see "Git workflow". The containers still hold no push credentials.
 - **Outbound network is unrestricted.** The config storage holds your claude.ai login token. A successful prompt injection that gets a command approved could send it, or your code, somewhere else. Read permission prompts carefully. An optional egress allowlist is planned.
@@ -389,6 +450,7 @@ What it does **not** protect (yet):
 
 Check `docker compose logs my-project` first. After a failed start, the container waits `CRB_RESTART_DELAY` seconds before it restarts.
 
+- **The dashboard shows "Noch kein Passkey" or "Bitte die öffentliche Adresse öffnen".** The page is locked until a passkey exists, and signing in works only at `CRB_DASHBOARD_URL`. Run `./crb dashboard login`; after an update from a version without the login, run `./crb update` first so that the service file passes the new variables. See "Signing in".
 - **`waiting for setup. Run on the host: docker compose exec -it <service> setup`.** Setup is not complete yet. Run it; the server starts by itself afterwards.
 - **`cannot write to the config directory /home/node/.claude (owner 0:0, container runs as 1000:1000)`.** The config directory on the host belongs to another user, usually root because Docker created it. Run the printed `chown` on the host with the real path, for example `sudo chown -R 1000:1000 ./my-project/config`. The container continues by itself.
 - **`server exited with status N, restarting in 30s` and `if this repeats, run setup again`.** The server failed after setup, for example because "Enable Remote Control?" was never answered or the login expired. Run `setup` again. If the log above the message mentions the permission mode, the value in `CRB_EXTRA_ARGS` is misspelled or not available for your account: fix or remove it in `services/<name>.yaml` and run `docker compose up -d <name>`; `setup` does not help in that case.
