@@ -97,7 +97,7 @@ After writing, the script SHALL run `docker compose config -q`. If it fails, the
 - **THEN** the script prints `docker compose up -d <name>` and `docker compose exec -it <name> setup`
 
 ### Requirement: Subcommand invocation
-The host script SHALL be named `crb` and SHALL take a subcommand as its first argument: `add [git-url]` runs the project scaffolding described in this capability, `update` runs the installation update, and no subcommand or an unknown one SHALL print a usage line listing both and exit non-zero. `crb add` SHALL behave exactly as the scaffolding script did, including its printed next steps.
+The host script SHALL be named `crb` and SHALL take a subcommand as its first argument: `add [git-url]` runs the project scaffolding described in this capability, `update` runs the installation update, `dashboard` adds the status dashboard, `git` runs the Git overview and sync described in `host-git-sync`, and no subcommand or an unknown one SHALL print a usage text listing all of them and exit non-zero. `crb add` SHALL behave exactly as the scaffolding script did, including its printed next steps.
 
 #### Scenario: Add with URL
 - **WHEN** the user runs `./crb add git@github.com:marc2016/FlashAgenda.git`
@@ -105,10 +105,10 @@ The host script SHALL be named `crb` and SHALL take a subcommand as its first ar
 
 #### Scenario: No subcommand
 - **WHEN** the user runs `./crb`
-- **THEN** the usage with `add` and `update` is printed and the exit code is non-zero
+- **THEN** the usage with `add`, `update`, `dashboard`, `git`, and `git sync` is printed and the exit code is non-zero
 
 ### Requirement: Dashboard subcommand
-`crb dashboard` SHALL add the status dashboard to the installation in the current directory: generate a random `CRB_STATUS_TOKEN` into `.env` when none exists, write `services/crb-dashboard.yaml` (dashboard image with the same tag scheme as the box, data volume, port from `CRB_DASHBOARD_BIND` defaulting to `127.0.0.1:8080`, hardening as in `box.yaml`), add it to `include:` in `compose.yaml`, and add `CRB_STATUS_URL: http://crb-dashboard:8080/api/ingest` and `CRB_STATUS_TOKEN: ${CRB_STATUS_TOKEN}` to the `environment:` of the `box` service in `box.yaml` so that every box reports. It SHALL show a summary and change nothing before confirmation, SHALL validate with `docker compose config -q` and roll back on failure like `add`, and SHALL print the commands to start the dashboard and to recreate the boxes. When the dashboard service already exists, it SHALL say so and exit without changes.
+`crb dashboard` without a further argument SHALL add the status dashboard to the installation in the current directory: generate a random `CRB_STATUS_TOKEN` into `.env` when none exists, write `services/crb-dashboard.yaml` (dashboard image with the same tag scheme as the box, data volume, port from `CRB_DASHBOARD_BIND` defaulting to `127.0.0.1:8080`, hardening as in `box.yaml`, and the login variables `CRB_DASHBOARD_URL`, `CRB_DASHBOARD_PROXY`, `CRB_DASHBOARD_AUTH`, and `CRB_DASHBOARD_REMOTE_INGEST` passed from `.env` with empty defaults), add it to `include:` in `compose.yaml`, and add `CRB_STATUS_URL: http://crb-dashboard:8080/api/ingest` and `CRB_STATUS_TOKEN: ${CRB_STATUS_TOKEN}` to the `environment:` of the `box` service in `box.yaml` so that every box reports. It SHALL show a summary and change nothing before confirmation, SHALL validate with `docker compose config -q` and roll back on failure like `add`, and SHALL print the commands to start the dashboard, to recreate the boxes, and to create the first passkey (`./crb dashboard login`). When the dashboard service already exists, it SHALL say so and exit without changes. With the argument `login`, `logout`, or `reset` it SHALL run the host command of that name as defined by `dashboard-auth`; any other argument SHALL print the usage and exit non-zero.
 
 #### Scenario: Add dashboard
 - **WHEN** the user runs `./crb dashboard` in an installation with two boxes and confirms
@@ -121,3 +121,15 @@ The host script SHALL be named `crb` and SHALL take a subcommand as its first ar
 #### Scenario: Single-file setup
 - **WHEN** the installation has no `box.yaml`
 - **THEN** the command prints the service block and the two environment lines to add by hand and changes nothing
+
+#### Scenario: Login variables wired
+- **WHEN** the dashboard was added and `.env` sets `CRB_DASHBOARD_URL=https://crb.example.org`
+- **THEN** `docker compose config crb-dashboard` shows `CRB_DASHBOARD_URL: https://crb.example.org` and the other three login variables as empty
+
+#### Scenario: Next step named
+- **WHEN** the dashboard was added
+- **THEN** the closing output names `./crb dashboard login` and no longer says that there is no login
+
+#### Scenario: Unknown argument
+- **WHEN** the user runs `./crb dashboard foo`
+- **THEN** the usage is printed, nothing is changed, and the exit code is non-zero
