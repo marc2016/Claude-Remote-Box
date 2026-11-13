@@ -93,10 +93,22 @@ test('git state of a box: checkouts, fetch time, old shapes', () => {
   assert.equal(b.sessions[0].git.unpushed, 2);
   assert.equal(b.sessions[0].git.remote, 'ok');
 
+  assert.equal(b.git.default_branch, null, 'a box that does not report the default branch');
+  assert.equal(b.sessions[0].git.behind_default, undefined);
+
+  // Distance to the default branch, as newer boxes report it.
+  store.ingest([ev('git', { fetched_at: fetched, default_branch: 'main', worktrees: [
+    { path: '/workspace', branch: 'main', ahead: 0, dirty: 0, remote: 'ok', upstream: 'origin/main', unpushed: 0, behind: 0, behind_default: 0 },
+    { path: '/workspace/.wt/x', branch: 'feat', ahead: 2, dirty: 1, remote: 'ok', upstream: 'origin/feat', unpushed: 2, behind: 0, behind_default: 12 }] })], new Date(T0));
+  b = buildCards(store, T0).boxes[0];
+  assert.equal(b.git.default_branch, 'main');
+  assert.equal(b.sessions[0].git.behind_default, 12);
+
   // An older box: no remote state, no fetch time.
   store.ingest([ev('git', { worktrees: [{ path: '/workspace', branch: 'main', ahead: 0, dirty: 0 }, { path: '/workspace/.wt/x', branch: 'feat', ahead: 2, dirty: 1 }] })], new Date(T0));
   b = buildCards(store, T0).boxes[0];
   assert.equal(b.git.fetched_at, null);
+  assert.equal(b.git.default_branch, null);
   assert.equal(b.git.worktrees.length, 2);
   assert.equal(b.sessions[0].git.remote, undefined);
   assert.equal(b.sessions[0].git.ahead, 2);
@@ -312,4 +324,78 @@ test('login: a database of the current release gets the tables and keeps its dat
   assert.equal(store.boxes()[0].phase, 'running');
   assert.equal(store.sessionEvents('s1').length, 1);
   store.close();
+});
+
+// --- Git actions --------------------------------------------------------------
+
+test('actions: queued, collected once, finished once', () => {
+  const store = openDb(':memory:');
+  const t = (s) => new Date(T0 + s * 1000);
+  const a = store.queueAction({ box: 'b1', kind: 'push', branch: 'calm-clock' }, t(0));
+  assert.ok(a.id);
+  assert.deepEqual(store.queueAction({ box: 'b1', kind: 'push', branch: 'calm-clock' }, t(1)), { id: a.id, existing: true }, 'an equal open action is not stored again');
+  const b = store.queueAction({ box: 'b1', kind: 'branch', name: 'rescue', carry: true }, t(2));
+  assert.equal(store.actions(50, t(3)).length, 2);
+
+  const next = store.nextAction(t(4));
+  assert.deepEqual(next, { id: a.id, box: 'b1', kind: 'push', branch: 'calm-clock', name: '', carry: false }, 'the oldest first');
+  assert.equal(store.nextAction(t(5)).id, b.id);
+  assert.equal(store.nextAction(t(6)), null, 'each action is handed out once');
+  assert.equal(store.queueAction({ box: 'b1', kind: 'push', branch: 'calm-clock' }, t(6)).existing, true, 'a running one is still open');
+
+  assert.equal(store.finishAction(a.id, 'done', '✓ calm-clock 2 gepusht\n', t(7)), 'b1');
+  assert.equal(store.finishAction(a.id, 'failed', 'again', t(8)), null, 'an outcome is accepted once');
+  assert.equal(store.finishAction('nope', 'done', '', t(8)), null);
+  const done = store.actions(50, t(9)).find((x) => x.id === a.id);
+  assert.equal(done.state, 'done');
+  assert.equal(done.text, '✓ calm-clock 2 gepusht');
+  assert.equal(done.branch, 'calm-clock');
+  assert.equal(done.finished, t(7).toISOString());
+  assert.ok(store.queueAction({ box: 'b1', kind: 'push', branch: 'calm-clock' }, t(10)).id !== a.id, 'after it finished the same action can be queued again');
+  assert.equal(store.finishAction(b.id, 'refused', 'x'.repeat(5000), t(11)), 'b1');
+  assert.equal(store.actions(50, t(12)).find((x) => x.id === b.id).text.length, 2001, 'long output is cut');
+});
+
+test('actions: an uncollected one expires after two minutes, a running one fails after ten', () => {
+  const store = openDb(':memory:');
+  const t = (s) => new Date(T0 + s * 1000);
+  const a = store.queueAction({ box: 'b1', kind: 'fetch' }, t(0));
+  assert.deepEqual(store.sweepActions(t(119)), []);
+  assert.deepEqual(store.sweepActions(t(121)), ['b1']);
+  assert.equal(store.actions(50, t(122))[0].state, 'expired');
+  assert.equal(store.nextAction(t(123)), null, 'an expired action is never handed out');
+
+  const b = store.queueAction({ box: 'b2', kind: 'sync' }, t(200));
+  assert.notEqual(b.id, a.id);
+  store.nextAction(t(201));
+  assert.deepEqual(store.sweepActions(t(201 + 599)), []);
+  assert.deepEqual(store.sweepActions(t(201 + 601)), ['b2']);
+  const failed = store.actions(50, t(900)).find((x) => x.id === b.id);
+  assert.equal(failed.state, 'failed');
+  assert.match(failed.text, /nicht geantwortet/);
+  assert.equal(store.finishAction(b.id, 'done', 'late', t(901)), null, 'a late outcome is rejected');
+});
+
+test('actions: at most 20 open, removed after seven days', () => {
+  const store = openDb(':memory:');
+  const t = (s) => new Date(T0 + s * 1000);
+  for (let i = 0; i < 20; i++) assert.ok(store.queueAction({ box: 'b1', kind: 'push', branch: `b${i}` }, t(0)).id);
+  assert.deepEqual(store.queueAction({ box: 'b1', kind: 'push', branch: 'one-more' }, t(1)), { full: true });
+  store.sweepActions(t(200));
+  assert.ok(store.queueAction({ box: 'b1', kind: 'push', branch: 'one-more' }, t(201)).id, 'expired ones do not count');
+  store.prune(new Date(T0 + 6 * 86400000));
+  assert.equal(store.actions(50, new Date(T0 + 6 * 86400000)).length, 21);
+  store.prune(new Date(T0 + 8 * 86400000));
+  assert.equal(store.actions(50, new Date(T0 + 8 * 86400000)).length, 0);
+});
+
+test('agent state: never seen, present, absent after 90 seconds', () => {
+  const store = openDb(':memory:');
+  const t = (s) => new Date(T0 + s * 1000);
+  assert.deepEqual(store.agentState(t(0)), { seen: false, present: false, at: null });
+  assert.equal(store.agentSeen(t(0)), true, 'it was absent before');
+  assert.equal(store.agentSeen(t(30)), false);
+  assert.deepEqual(store.agentState(t(100)), { seen: true, present: true, at: t(30).toISOString() });
+  assert.equal(store.agentState(t(121)).present, false);
+  assert.equal(store.agentSeen(t(200)), true);
 });

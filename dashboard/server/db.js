@@ -1,6 +1,6 @@
 // SQLite storage: raw events (idempotent by box+seq), per-session and per-box
-// state updated on ingest, pruning, and the login's passkeys, sessions, and
-// enrollment link.
+// state updated on ingest, pruning, the login's passkeys, sessions, and
+// enrollment link, and the Git actions queued for the host agent.
 import { createHash, randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -9,6 +9,14 @@ const SESSION_RETENTION_DAYS = 90;
 export const LOGIN_DAYS = 30;
 export const ENROLL_MINUTES = 10;
 const TOUCH_EVERY_MS = 60 * 1000;
+/** A queued action nobody collected is dropped: it must not run later against another state. */
+export const ACTION_QUEUE_SECONDS = 120;
+export const ACTION_RUN_MINUTES = 10;
+export const ACTION_OPEN_LIMIT = 20;
+export const AGENT_PRESENT_SECONDS = 90;
+const ACTION_RETENTION_DAYS = 7;
+const ACTION_TEXT_LIMIT = 2000;
+export const ACTION_KINDS = ['fetch', 'sync', 'push', 'pull', 'merge', 'branch'];
 
 /** Cookie values and link secrets are stored as this hash only. */
 const sha256 = (value) => createHash('sha256').update(String(value)).digest('hex');
@@ -52,6 +60,15 @@ export function openDb(file) {
     );
     CREATE TABLE IF NOT EXISTS auth_enroll (
       id INTEGER PRIMARY KEY CHECK (id = 1), hash TEXT NOT NULL, issued TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS git_actions (
+      id TEXT PRIMARY KEY, box TEXT NOT NULL, kind TEXT NOT NULL, branch TEXT NOT NULL DEFAULT '',
+      name TEXT NOT NULL DEFAULT '', carry INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL,
+      queued TEXT NOT NULL, started TEXT, finished TEXT, text TEXT
+    );
+    CREATE INDEX IF NOT EXISTS git_actions_state ON git_actions (state, queued);
+    CREATE TABLE IF NOT EXISTS agent_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1), seen TEXT NOT NULL
     );
   `);
   // Columns added after the first release, for databases created before them.
@@ -131,7 +148,7 @@ export class Store {
       case 'git':
         // Stored as an object; rows written before `fetched_at` existed hold the bare array.
         db.prepare('UPDATE boxes SET git_json = ? WHERE name = ?')
-          .run(JSON.stringify({ worktrees: Array.isArray(ev.worktrees) ? ev.worktrees : [], fetched_at: ev.fetched_at ?? null }), ev.box);
+          .run(JSON.stringify({ worktrees: Array.isArray(ev.worktrees) ? ev.worktrees : [], fetched_at: ev.fetched_at ?? null, default_branch: ev.default_branch ?? null }), ev.box);
         break;
       default:
         if (ev.session) this.applySession(ev, ts);
@@ -212,6 +229,7 @@ export class Store {
     const b = this.db.prepare('DELETE FROM sessions WHERE COALESCE(last_activity, last, started) < ?').run(cutSessions).changes;
     this.db.prepare('DELETE FROM auth_sessions WHERE last_used < ?').run(loginCut(now));
     this.db.prepare('DELETE FROM auth_enroll WHERE issued < ?').run(enrollCut(now));
+    this.db.prepare('DELETE FROM git_actions WHERE queued < ?').run(new Date(now.getTime() - ACTION_RETENTION_DAYS * 86400000).toISOString());
     return { events: a, sessions: b };
   }
 
@@ -253,12 +271,12 @@ export class Store {
   session(value, now = new Date()) {
     if (typeof value !== 'string' || !value) return null;
     const hash = sha256(value);
-    const r = this.db.prepare(`SELECT s.hash, s.passkey, s.last_used FROM auth_sessions s
+    const r = this.db.prepare(`SELECT s.hash, s.passkey, s.created, s.last_used FROM auth_sessions s
       JOIN auth_passkeys p ON p.id = s.passkey WHERE s.hash = ? AND s.last_used >= ?`).get(hash, loginCut(now));
     if (!r) return null;
     const renewed = now.getTime() - Date.parse(r.last_used) >= TOUCH_EVERY_MS;
     if (renewed) this.db.prepare('UPDATE auth_sessions SET last_used = ? WHERE hash = ?').run(now.toISOString(), hash);
-    return { hash, passkey: r.passkey, renewed };
+    return { hash, passkey: r.passkey, created: r.created, renewed };
   }
 
   /** Whether the session with this hash still exists and is within its lifetime; does not count as a use. */
@@ -301,6 +319,90 @@ export class Store {
 
   spendEnroll() {
     this.db.prepare('DELETE FROM auth_enroll').run();
+  }
+
+  // --- Git actions for the host agent ------------------------------------------
+
+  boxKnown(name) {
+    return Boolean(this.db.prepare('SELECT 1 FROM boxes WHERE name = ?').get(name));
+  }
+
+  /**
+   * Ends what time has decided: queued actions nobody collected, running ones
+   * without an answer. Returns the boxes whose actions changed.
+   */
+  sweepActions(now = new Date()) {
+    const t = now.toISOString();
+    const queuedCut = new Date(now.getTime() - ACTION_QUEUE_SECONDS * 1000).toISOString();
+    const runCut = new Date(now.getTime() - ACTION_RUN_MINUTES * 60000).toISOString();
+    const hit = this.db.prepare(`SELECT DISTINCT box FROM git_actions
+      WHERE (state = 'queued' AND queued < ?) OR (state = 'running' AND started < ?)`).all(queuedCut, runCut).map((r) => r.box);
+    if (!hit.length) return hit;
+    this.db.prepare("UPDATE git_actions SET state = 'expired', finished = ?, text = ? WHERE state = 'queued' AND queued < ?")
+      .run(t, 'Der Host-Agent hat die Aktion nicht abgeholt.', queuedCut);
+    this.db.prepare("UPDATE git_actions SET state = 'failed', finished = ?, text = ? WHERE state = 'running' AND started < ?")
+      .run(t, 'Der Host hat nicht geantwortet.', runCut);
+    return hit;
+  }
+
+  /**
+   * Queues an action. `{ id }` for a new one, `{ id, existing: true }` when an
+   * equal one is still open, `{ full: true }` at the limit of open actions.
+   */
+  queueAction({ box, kind, branch = '', name = '', carry = false }, now = new Date()) {
+    this.sweepActions(now);
+    const same = this.db.prepare(`SELECT id FROM git_actions WHERE state IN ('queued', 'running')
+      AND box = ? AND kind = ? AND branch = ? AND name = ? AND carry = ?`).get(box, kind, branch, name, carry ? 1 : 0);
+    if (same) return { id: same.id, existing: true };
+    const open = this.db.prepare("SELECT COUNT(*) AS c FROM git_actions WHERE state IN ('queued', 'running')").get().c;
+    if (open >= ACTION_OPEN_LIMIT) return { full: true };
+    const id = randomBytes(12).toString('base64url');
+    this.db.prepare("INSERT INTO git_actions (id, box, kind, branch, name, carry, state, queued) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)")
+      .run(id, box, kind, branch, name, carry ? 1 : 0, now.toISOString());
+    return { id };
+  }
+
+  /** Hands out the oldest queued action once and marks it as running; null when none is queued. */
+  nextAction(now = new Date()) {
+    this.sweepActions(now);
+    const r = this.db.prepare("SELECT * FROM git_actions WHERE state = 'queued' ORDER BY queued, rowid LIMIT 1").get();
+    if (!r) return null;
+    this.db.prepare("UPDATE git_actions SET state = 'running', started = ? WHERE id = ? AND state = 'queued'").run(now.toISOString(), r.id);
+    return { id: r.id, box: r.box, kind: r.kind, branch: r.branch, name: r.name, carry: Boolean(r.carry) };
+  }
+
+  /** Stores the outcome of a running action, once. Returns its box, or null when it was not running. */
+  finishAction(id, state, text, now = new Date()) {
+    this.sweepActions(now);
+    const r = this.db.prepare("SELECT box FROM git_actions WHERE id = ? AND state = 'running'").get(id);
+    if (!r) return null;
+    const t = String(text ?? '').trim();
+    this.db.prepare('UPDATE git_actions SET state = ?, finished = ?, text = ? WHERE id = ?')
+      .run(state, now.toISOString(), t.length > ACTION_TEXT_LIMIT ? t.slice(0, ACTION_TEXT_LIMIT) + '…' : t, id);
+    return r.box;
+  }
+
+  /** The most recent actions, newest first. */
+  actions(limit = 50, now = new Date()) {
+    this.sweepActions(now);
+    return this.db.prepare('SELECT * FROM git_actions ORDER BY queued DESC, rowid DESC LIMIT ?').all(limit).map((r) => ({
+      id: r.id, box: r.box, kind: r.kind, branch: r.branch || null, name: r.name || null, carry: Boolean(r.carry),
+      state: r.state, queued: r.queued, started: r.started ?? null, finished: r.finished ?? null, text: r.text ?? null,
+    }));
+  }
+
+  /** Records a request of the agent. Returns true when it was absent before. */
+  agentSeen(now = new Date()) {
+    const was = this.agentState(now).present;
+    this.db.prepare('INSERT INTO agent_state (id, seen) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET seen = excluded.seen').run(now.toISOString());
+    return !was;
+  }
+
+  /** `seen`: an agent has ever asked for work; `present`: within the last AGENT_PRESENT_SECONDS. */
+  agentState(now = new Date()) {
+    const r = this.db.prepare('SELECT seen FROM agent_state WHERE id = 1').get();
+    if (!r) return { seen: false, present: false, at: null };
+    return { seen: true, present: now.getTime() - Date.parse(r.seen) < AGENT_PRESENT_SECONDS * 1000, at: r.seen };
   }
 
   close() { this.db.close(); }

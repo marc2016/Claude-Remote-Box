@@ -180,6 +180,8 @@ To reset it: `docker compose down another-project && docker volume rm <stack>_an
 | `CRB_DASHBOARD_PROXY` | (empty) | Address of your reverse proxy as the dashboard sees it, or several addresses and CIDR ranges separated by commas (in `.env`). Only from there is `X-Forwarded-For` believed |
 | `CRB_DASHBOARD_AUTH` | (on) | `off` turns the login off (in `.env`): for a dashboard that stays on a private network |
 | `CRB_DASHBOARD_REMOTE_INGEST` | (empty) | `1` accepts box reports that arrive through a proxy (in `.env`): for boxes on another host |
+| `CRB_AGENT_TOKEN` | (empty) | Shared by the dashboard and the host agent (in `.env`); `crb agent install` generates it. It is passed to the dashboard only, never to a box. Empty: the dashboard offers no Git actions |
+| `CRB_AGENT_FETCH_MINUTES` | `5` | How often the host agent fetches every project (in `.env`) |
 | `UID` / `GID` | `1000` | User the container runs as. Set them to your host user in `.env` so files in your project keep the right owner |
 | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | (empty) | Git identity for commits made by Claude |
 
@@ -193,7 +195,7 @@ Phone mode is a file `CLAUDE.md` in the project's config directory, `./my-projec
 
 ## Status dashboard
 
-One page, made for the phone, with one card per box: status and phase, permission mode, the active session with model, context size and token totals, what Claude is doing right now, and, most prominent, whether it waits for your approval. A box without setup shows the `setup` command instead. Tap a card for the session's timeline: your prompts, Claude's replies, the tool calls between them. The card's Git row shows the session's branch with its push state ("2 nicht gepusht", "3 hinter", "nicht auf origin", "auf origin gelöscht", "gepusht") and the number of changed files; the detail view lists every checkout of the box that way, with the age of the last fetch. The dashboard only shows this; pulling and pushing is `./crb git sync` on the host, see "Git workflow". Light and dark follow the device.
+One page, made for the phone, with one card per box: status and phase, permission mode, the active session with model, context size and token totals, what Claude is doing right now, and, most prominent, whether it waits for your approval. A box without setup shows the `setup` command instead. Tap a card for the session's timeline: your prompts, Claude's replies, the tool calls between them. The card's Git row shows the session's branch with its push state ("2 nicht gepusht", "3 hinter", "nicht auf origin", "auf origin gelöscht", "gepusht") and the number of changed files; the detail view lists every checkout of the box that way, with the age of the last fetch. A session's branch that has fallen behind `origin`'s default branch is marked with a warning ("12 hinter main"). With the host agent running, the detail view also has buttons to push, pull, merge into `main`, and create a branch, see "Git actions from the dashboard". Light and dark follow the device.
 
 ```sh
 ./crb dashboard        # adds the service and wires every box to it
@@ -228,7 +230,7 @@ Passkeys are bound to the host name of `CRB_DASHBOARD_URL`. If that name changes
 
 Passkeys need HTTPS, and the dashboard itself speaks plain HTTP. Put a reverse proxy with a certificate in front of it:
 
-- **The proxy** terminates TLS for the public address and forwards to the dashboard's port. It has to set `X-Forwarded-For` (every common proxy does) and must not buffer responses of `/api/events`, which is a long-lived event stream. Do not forward `/api/ingest`: boxes report over the Compose network, and the dashboard answers `403` to an ingest request that a proxy forwarded.
+- **The proxy** terminates TLS for the public address and forwards to the dashboard's port. It has to set `X-Forwarded-For` (every common proxy does) and must not buffer responses of `/api/events`, which is a long-lived event stream. Do not forward `/api/ingest` and `/api/agent/`: boxes report over the Compose network and the host agent connects on the machine itself, and the dashboard answers `403` to such a request that a proxy forwarded.
 - **The port.** By default it is bound to `127.0.0.1:8080`, which is enough for a proxy on the same machine. For a proxy on another machine, set `CRB_DASHBOARD_BIND` in `.env` to an address that proxy can reach, for example `192.168.1.10:8080`, and let your firewall allow only the proxy to connect. Opening the port directly, as `http://host:8080`, shows a link to the public address and no data: signing in works only at the public address.
 - **`CRB_DASHBOARD_PROXY`.** Sign-in attempts are limited to 10 per minute and client. Without this setting every visitor behind the proxy counts as one client. If the value does not match, `docker compose logs crb-dashboard` names the address the dashboard sees for the proxy; depending on your Docker network setup that can be the bridge gateway instead of the proxy's own address.
 
@@ -241,6 +243,7 @@ server {
   # ssl_certificate ...; ssl_certificate_key ...;
 
   location = /api/ingest { return 403; }
+  location /api/agent/ { return 403; }
   location / {
     proxy_pass http://192.168.1.10:8080;
     proxy_set_header Host $host;
@@ -254,7 +257,7 @@ server {
 
 Once the dashboard is reachable from outside, the login and the proxy's TLS are all that stands between the internet and the stored prompts and replies. Publish it only when it runs a version with the login and a passkey exists.
 
-**Without the login.** `CRB_DASHBOARD_AUTH=off` in `.env` serves the page to everyone who reaches the port, as versions before the login did. Use it only on a private network or behind a VPN such as Tailscale, and never together with a public address.
+**Without the login.** `CRB_DASHBOARD_AUTH=off` in `.env` serves the page to everyone who reaches the port, as versions before the login did. Use it only on a private network or behind a VPN such as Tailscale, and never together with a public address. Without the login the dashboard only shows: Git actions need a passkey session.
 
 To see the dashboard with dummy data on any machine with Node 22.13+ (it needs `node:sqlite`), without boxes: `cd dashboard && npm install && npm run demo`, then open `http://127.0.0.1:8080`; `PORT=8091 npm run demo` if 8080 is taken. The demo shows one box in every state, including an animated Clawd per card. The demo and the development mode run with the login off. For development with hot reload, `npm run dev` starts the server, Vite and the seed together; open `http://localhost:5173`.
 
@@ -264,7 +267,7 @@ Tap a card to open it: the card grows into a detail view with its information on
 
 A box can report what it does to an HTTP endpoint you run, normally the status dashboard above. Set `CRB_STATUS_URL` and `CRB_STATUS_TOKEN` on the service; without the URL nothing runs and nothing is sent.
 
-What is sent, as JSON arrays of events with the box name, a timestamp, and a sequence number: `phase` on every change (`waiting-config`, `waiting-setup`, `running`, `restarting`), a `heartbeat` every 30 s with phase, uptime, image and Claude Code version, and spawn mode, and per session `session_start`, `prompt`, `reply`, `tool` (tool name plus the command, path, or pattern), `tool_result` (ok or error), `waiting` when a tool call has had no result for 10 s (a permission prompt or a long-running command, the box cannot tell), `resumed`, `summary` after each reply (model, token totals, current context size, turns, tool calls, and cost and changed lines when the transcript has them), `session_end` after an hour without activity, and, when `/workspace` is a Git repository, `git` with every heartbeat: per checkout (the workspace and every worktree) `path`, `branch`, `ahead` (commits ahead of the default branch), `dirty` (changed files), `added` and `removed` (lines against the default branch), `subject` and `committed` of the last commit, `remote` (`ok`, `none`, or `gone`), `upstream`, `unpushed`, and `behind`, plus `fetched_at`, the time of the repository's last fetch. The watcher reads this from the repository and never contacts a remote.
+What is sent, as JSON arrays of events with the box name, a timestamp, and a sequence number: `phase` on every change (`waiting-config`, `waiting-setup`, `running`, `restarting`), a `heartbeat` every 30 s with phase, uptime, image and Claude Code version, and spawn mode, and per session `session_start`, `prompt`, `reply`, `tool` (tool name plus the command, path, or pattern), `tool_result` (ok or error), `waiting` when a tool call has had no result for 10 s (a permission prompt or a long-running command, the box cannot tell), `resumed`, `summary` after each reply (model, token totals, current context size, turns, tool calls, and cost and changed lines when the transcript has them), `session_end` after an hour without activity, and, when `/workspace` is a Git repository, `git` with every heartbeat: per checkout (the workspace and every worktree) `path`, `branch`, `ahead` (commits ahead of the default branch), `dirty` (changed files), `added` and `removed` (lines against the default branch), `subject` and `committed` of the last commit, `remote` (`ok`, `none`, or `gone`), `upstream`, `unpushed`, `behind`, and `behind_default` (commits of `origin`'s default branch the checkout lacks), plus `fetched_at`, the time of the repository's last fetch, and `default_branch`. The watcher reads this from the repository and never contacts a remote.
 
 The data comes from a small watcher process in the container that reads the session transcripts Claude Code writes in the config directory. It only reads; sessions are not slowed down. Prompts and replies are truncated to 4000 characters. Sends time out after 2 s; while the endpoint is unreachable, events are kept in a spool (newest 500) and delivered in order afterwards.
 
@@ -316,6 +319,7 @@ One command brings the whole installation up to date, and it is safe to run at a
 1. It fetches the newest `crb` from this repository and, if it differs, replaces itself and starts over with the new version. Set `CRB_SOURCE` to a URL or a local path to fetch from somewhere else. GitHub may serve a copy that is a few minutes old right after a push.
 2. If `box.yaml` pins a release tag, it offers to switch to `latest`.
    If the dashboard service file was written before the dashboard had a login, it offers to add the `CRB_DASHBOARD_*` variables to it. After such an update the dashboard is locked until you create a passkey with `./crb dashboard login`, see "Signing in".
+   If the file does not pass `CRB_AGENT_TOKEN` yet, it offers to add that line. It does not create the token or install the agent; that is `./crb agent install`, see "Git actions from the dashboard". A running agent picks up the new `crb` by itself.
 3. For every project in `services/`, it shows the current permission mode and phone-mode state and asks only about what is missing: the permission mode when none is set (Enter keeps `default`) and the phone-mode file when there is none. Projects created by hand, and single-file setups with services in `compose.yaml`, are not edited; the command prints what to add where.
 4. It shows a summary and changes nothing before you confirm. If `docker compose config -q` fails afterwards, the changed files are restored.
 5. It runs `docker compose pull`. Services whose environment changed need `docker compose up -d <name>` to pick it up, which ends their running sessions, so the command asks first (default no) and prints the command for later.
@@ -337,6 +341,10 @@ Claude can commit inside `/workspace`. The container holds no push credentials, 
 ./crb git --list           # fetch every project and show where each branch stands
 ./crb git sync             # fetch, then fast-forward and push
 ./crb git sync my-project  # only one project
+./crb git push my-project calm-clock          # one branch, one direction
+./crb git pull my-project main
+./crb git merge my-project calm-clock         # into origin's default branch, then push
+./crb git branch my-project feature/nav       # new branch, checked out in the workspace
 ```
 
 ### The menu
@@ -415,7 +423,7 @@ Two things to know before you make it a habit:
 
 **From the phone.** For the menu, open an SSH session and run `./crb git`. The overview and `sync` run without asking anything, so an iOS shortcut with the action "Run script over SSH" and the script `cd ~/claude-remote-box && ./crb git sync` is a sync button. A shortcut has no SSH agent: the host needs a key for the Git remote that works without a passphrase prompt, for example a deploy key. If the remote would ask for a passphrase, a password, or a host-key confirmation, the fetch fails instead of waiting.
 
-**Keeping the dashboard current.** The boxes never contact `origin`; the dashboard's "hinter" counts are as fresh as the last fetch on the host. A cron line that runs the read-only overview keeps them current without pushing anything:
+**Keeping the dashboard current.** The boxes never contact `origin`; the dashboard's "hinter" counts are as fresh as the last fetch on the host. The host agent fetches every five minutes. Without the agent, a cron line that runs the read-only overview keeps them current without pushing anything:
 
 ```text
 */15 * * * * cd ~/claude-remote-box && ./crb git >/dev/null 2>&1
@@ -424,6 +432,40 @@ Two things to know before you make it a habit:
 `--no-fetch` shows the stored state without contacting `origin`, in the overview and in the menu. Projects need the `services/` layout and a remote named `origin`; other remotes are ignored.
 
 In `worktree` mode, sessions started from the app work in git worktrees inside your project, and `crb git` handles their branches like any other. Git records a worktree with the path it has where it was created, which is the path inside the container. Clean worktrees up from inside the container, where those paths are valid: `docker compose exec my-project git worktree remove <path>`.
+
+### Single actions
+
+The four single commands handle one branch without a menu and without a question. Each fetches first and changes nothing when the fetch fails. They exit with 0 when they did what was asked, with 3 when they refused and changed nothing, and with 1 when something failed.
+
+- **`push` and `pull`** apply the rule of the table above to one branch: `push` when it is only ahead or new, `pull` when it is only behind and its checkout has no modified tracked files. In every other state they say why they do nothing.
+- **`merge <project> <branch>`** brings the branch into `origin`'s default branch and pushes the result, in one step. It computes the merge without touching any working tree (a fast-forward when the branch already contains the default branch, a merge commit otherwise), pushes it, and only then moves your local default branch: with its files where it is checked out without modified tracked files, the reference alone where it is not checked out. A conflict, or a push that `origin` rejects, leaves every branch and file as it was; the conflicting files are named. It refuses when your local default branch has commits that are not on `origin`, so it never publishes commits you did not name. Uncommitted changes in the branch's checkout are not part of the merge. Needs Git 2.38 or newer on the host.
+- **`branch <project> <name>`** creates a branch at `origin`'s default branch and checks it out in the workspace's own checkout; it refuses when that checkout has modified tracked files. With `--carry`, for a workspace that has the default branch checked out with commits that are not on `origin`: the new branch starts at the current commit, so no file changes, and the default branch goes back to `origin`'s state. The commits are then on the new branch only. The new branch is not pushed.
+
+`push`, `pull`, `merge`, `branch`, and `sync` are reserved as the first argument of `crb git`; a project with one of these names is reachable through the menu.
+
+### Git actions from the dashboard
+
+The dashboard container has no Git credentials and sees no workspace, and that stays so. Instead, a small process on the host, the agent, asks the dashboard for work and carries it out with your credentials:
+
+```sh
+./crb agent install     # creates CRB_AGENT_TOKEN, restarts the dashboard, installs the service
+./crb agent status      # service, last fetch, connection to the dashboard
+./crb agent uninstall
+./crb agent             # runs it in the foreground instead
+```
+
+The agent does two things. It fetches every project every five minutes (`CRB_AGENT_FETCH_MINUTES`), which keeps the dashboard's "hinter" counts and the warning for stale session branches current; nothing else changes by that. And it carries out the actions you tap in a box's detail view: "pushen", "holen", "nach main mergen" per checkout, and "Jetzt abrufen", "Synchronisieren", "Neuer Branch" for the box. Each one is exactly the `crb git` command described above, one at a time, and the page shows its result or the reason it was refused.
+
+What to know:
+
+- **A tap publishes.** Push, merge, and sync go to `origin` without a review step. Every action except "Jetzt abrufen" asks for confirmation, and a sign-in older than ten minutes has to be confirmed with the passkey once more.
+- **The agent is on the host only.** It connects to the dashboard's port on the same machine with its own token, `CRB_AGENT_TOKEN`, which no box gets. The dashboard refuses agent requests that arrive through the reverse proxy.
+- **A fixed set of actions.** The dashboard can queue the six kinds above for a known box and a branch name made of letters, digits, `.`, `_`, `/`, `-`. The agent checks them again and passes them to Git as arguments. It never force-pushes, never deletes a branch or a worktree, and runs nothing an action supplies.
+- **Nothing runs late.** An action the agent did not collect within two minutes expires. While the agent has not been heard from for 90 seconds, the page says so and offers no action.
+- **Diverged branches** are shown, not resolved: use the menu of `./crb git`. A session branch behind `main` is brought up to date by its session; tell Claude in the conversation.
+- **Credentials without a terminal.** The service has no SSH agent. The host needs a key for the Git remote that works without a passphrase prompt, or a credential helper; check with `./crb git --list` from a shell without an agent. A remote that would ask counts as a failed fetch in the agent's log.
+- **The service** is a systemd unit of your user (`~/.config/systemd/user/crb-agent.service`); its log is `journalctl --user -u crb-agent`. Services of a user stop when the user logs out unless lingering is on; `crb agent install` prints the command to enable it (`sudo loginctl enable-linger <user>`) and does not run it. On a host without systemd for users, keep `./crb agent` running by other means.
+- **Needs the login.** With `CRB_DASHBOARD_AUTH=off` the dashboard offers no actions.
 
 ## Security model
 
@@ -434,11 +476,12 @@ What the setup protects:
 - No inbound ports. Remote Control works over outbound HTTPS.
 - In `default` mode, shell commands that are not pre-approved need your confirmation on the phone. In `acceptEdits` mode, file edits inside the project run without asking, commands still ask.
 
-- The dashboard shows data only to a browser that signed in with a passkey, and it has no password that could be guessed or phished. Its container mounts only its own data volume.
+- The dashboard shows data only to a browser that signed in with a passkey, and it has no password that could be guessed or phished. Its container mounts only its own data volume and holds no Git credentials, also with Git actions enabled.
 
 What it does **not** protect (yet):
 
-- **The dashboard login is one layer.** Behind a reverse proxy it is the only thing between the internet and your stored prompts and replies. Anyone with shell access to the host can create a passkey, and anyone who reaches the port without the proxy talks plain HTTP to it, so keep that port reachable for the proxy only. The dashboard can only show; it cannot approve, pull, or push.
+- **The dashboard login is one layer.** Behind a reverse proxy it is the only thing between the internet and your stored prompts and replies. Anyone with shell access to the host can create a passkey, and anyone who reaches the port without the proxy talks plain HTTP to it, so keep that port reachable for the proxy only. The dashboard cannot approve anything for a session.
+- **With the host agent, a signed-in browser can publish.** Push, merge into the default branch, and sync run on the host with your credentials and without a review step, see "Git actions from the dashboard". What limits this: actions need a passkey confirmation that is at most ten minutes old, come only from the page at the public address, are a fixed set that never force-pushes or deletes, and the agent's token is in no box. Without `./crb agent install` the dashboard only shows. If `main` must never change without review, protect it on the remote: a rejected push changes nothing locally.
 
 - **`./crb git sync` publishes what Claude committed.** The push runs on the host with your credentials and without a review step, see "Git workflow". The containers still hold no push credentials.
 - **Outbound network is unrestricted.** The config storage holds your claude.ai login token. A successful prompt injection that gets a command approved could send it, or your code, somewhere else. Read permission prompts carefully. An optional egress allowlist is planned.
@@ -451,6 +494,7 @@ What it does **not** protect (yet):
 Check `docker compose logs my-project` first. After a failed start, the container waits `CRB_RESTART_DELAY` seconds before it restarts.
 
 - **The dashboard shows "Noch kein Passkey" or "Bitte die öffentliche Adresse öffnen".** The page is locked until a passkey exists, and signing in works only at `CRB_DASHBOARD_URL`. Run `./crb dashboard login`; after an update from a version without the login, run `./crb update` first so that the service file passes the new variables. See "Signing in".
+- **The dashboard shows "Der Host-Agent meldet sich nicht" or offers no Git actions.** Run `./crb agent status` on the host. No actions at all: the agent was never installed (`./crb agent install`), or the login is off. "lehnt das Token ab": the dashboard runs with another `CRB_AGENT_TOKEN` than `.env` has, usually because it was not recreated; `docker compose up -d crb-dashboard`. A fetch that fails in `journalctl --user -u crb-agent`: the Git credentials need a terminal, see "Git actions from the dashboard".
 - **`waiting for setup. Run on the host: docker compose exec -it <service> setup`.** Setup is not complete yet. Run it; the server starts by itself afterwards.
 - **`cannot write to the config directory /home/node/.claude (owner 0:0, container runs as 1000:1000)`.** The config directory on the host belongs to another user, usually root because Docker created it. Run the printed `chown` on the host with the real path, for example `sudo chown -R 1000:1000 ./my-project/config`. The container continues by itself.
 - **`server exited with status N, restarting in 30s` and `if this repeats, run setup again`.** The server failed after setup, for example because "Enable Remote Control?" was never answered or the login expired. Run `setup` again. If the log above the message mentions the permission mode, the value in `CRB_EXTRA_ARGS` is misspelled or not available for your account: fix or remove it in `services/<name>.yaml` and run `docker compose up -d <name>`; `setup` does not help in that case.

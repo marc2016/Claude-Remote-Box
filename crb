@@ -9,6 +9,14 @@
 #   ./crb git [project]   menu: project, branch, action. Without a terminal
 #                         or with --list: main and every branch against origin
 #   ./crb git sync [project]  fast-forwards and pushes them (never forces)
+#   ./crb git push|pull <project> <branch>   that rule for one branch
+#   ./crb git merge <project> <branch>   merges it into origin's default
+#                         branch and pushes the result
+#   ./crb git branch <project> <name> [--carry]  new branch, checked out in
+#                         the workspace; --carry takes main's own commits along
+#   ./crb agent           the host agent: fetches at an interval and carries
+#                         out the Git actions queued in the dashboard
+#   ./crb agent install   sets it up as a service of this user (uninstall, status)
 # Run it in the directory that holds compose.yaml.
 # A new box.yaml uses the newest release (latest). Override the tag to pin a
 # release or test an unreleased build: CRB_VERSION=edge ./crb add
@@ -56,6 +64,11 @@ usage() {
   echo "       ./crb git [projekt]   Git-Menü: Projekt, Branch, Aktion (ohne Terminal: Übersicht)"
   echo "       ./crb git --list      Übersicht: main und Branches gegen origin"
   echo "       ./crb git sync [projekt]  mit origin abgleichen: pull und push"
+  echo "       ./crb git push|pull <projekt> <branch>   einen Branch pushen oder holen"
+  echo "       ./crb git merge <projekt> <branch>       in den Standard-Branch mergen und pushen"
+  echo "       ./crb git branch <projekt> <name> [--carry]  Branch anlegen und auschecken"
+  echo "       ./crb agent           Host-Agent: regelmäßig abrufen, Aktionen aus dem Dashboard ausführen"
+  echo "       ./crb agent install|uninstall|status   als Dienst einrichten, entfernen, Zustand zeigen"
 }
 
 # ask VAR "Question" [default]: empty input takes the default.
@@ -248,15 +261,17 @@ dashboard_env_line() { printf '      %s: "${%s:-}"\n' "$1" "$1"; }
 # dashboard_by_crb: the service file was written by crb, so its layout is known.
 dashboard_by_crb() { head -n 1 "$DASHBOARD_FILE" | grep -q '^# Created by crb\.'; }
 
-# add_dashboard_env: adds the missing login variables below CRB_STATUS_TOKEN
-# and changes no other line.
+# add_dashboard_env: adds the missing login variables below the tokens
+# (CRB_AGENT_TOKEN when the file has it, else CRB_STATUS_TOKEN) and changes no
+# other line.
 add_dashboard_env() {
-  local lines="" key tmp
+  local lines="" key tmp anchor=CRB_STATUS_TOKEN
   for key in $(dashboard_env_missing); do lines="$lines$(dashboard_env_line "$key")"$'\n'; done
   [ -n "$lines" ] || return 0
+  if grep -qE '^      CRB_AGENT_TOKEN:' "$DASHBOARD_FILE"; then anchor=CRB_AGENT_TOKEN; fi
   tmp=$(mktemp)
   # shellcheck disable=SC2016
-  LINES_TO_ADD=${lines%$'\n'} awk '{ print } !done && /^      CRB_STATUS_TOKEN:/ { print ENVIRON["LINES_TO_ADD"]; done = 1 }' "$DASHBOARD_FILE" > "$tmp"
+  LINES_TO_ADD=${lines%$'\n'} ANCHOR="      $anchor:" awk '{ print } !done && index($0, ENVIRON["ANCHOR"]) == 1 { print ENVIRON["LINES_TO_ADD"]; done = 1 }' "$DASHBOARD_FILE" > "$tmp"
   cat "$tmp" > "$DASHBOARD_FILE"
   rm -f "$tmp"
 }
@@ -848,6 +863,18 @@ cmd_update() {
     fi
   fi
 
+  local plan_agent=0
+  if [ "$layout" = services ] && [ -f "$DASHBOARD_FILE" ] && agent_env_missing; then
+    echo "   Das Dashboard kann jetzt Git-Aktionen auslösen. $DASHBOARD_FILE fehlt: CRB_AGENT_TOKEN"
+    echo "   Die Aktionen brauchen den Host-Agenten: ./crb agent install"
+    if ! dashboard_by_crb; then
+      echo "   Die Datei ist nicht von crb angelegt und bleibt unverändert. Unter environment: eintragen:"
+      dashboard_env_line CRB_AGENT_TOKEN | sed 's/^/   /'
+    elif confirm_yes "   CRB_AGENT_TOKEN in $DASHBOARD_FILE eintragen?"; then
+      plan_agent=1
+    fi
+  fi
+
   # Parallel arrays (bash 3.2 has no associative arrays).
   local -a names=() modes=() phones=()
   local f n permission current extra has_file
@@ -912,6 +939,10 @@ cmd_update() {
     changed_files+=("$DASHBOARD_FILE")
     changed_services+=(crb-dashboard)
   fi
+  if [ "$plan_agent" -eq 1 ]; then
+    echo "  $DASHBOARD_FILE:  CRB_AGENT_TOKEN"
+    if [ "$plan_login" -eq 0 ]; then changed_files+=("$DASHBOARD_FILE"); changed_services+=(crb-dashboard); fi
+  fi
   for i in "${!names[@]}"; do
     n=${names[$i]}
     if [ -n "${modes[$i]}" ]; then
@@ -960,6 +991,10 @@ cmd_update() {
     if [ "$plan_login" -eq 1 ]; then
       add_dashboard_env
       echo "   $DASHBOARD_FILE: $missing_login"
+    fi
+    if [ "$plan_agent" -eq 1 ]; then
+      add_agent_env
+      echo "   $DASHBOARD_FILE: CRB_AGENT_TOKEN"
     fi
     for i in "${!names[@]}"; do
       n=${names[$i]}
@@ -1093,6 +1128,7 @@ services:
     security_opt: [no-new-privileges:true]
     environment:
       CRB_STATUS_TOKEN: "\${CRB_STATUS_TOKEN}"
+      CRB_AGENT_TOKEN: "\${CRB_AGENT_TOKEN:-}"
       CRB_DASHBOARD_URL: "\${CRB_DASHBOARD_URL:-}"
       CRB_DASHBOARD_PROXY: "\${CRB_DASHBOARD_PROXY:-}"
       CRB_DASHBOARD_AUTH: "\${CRB_DASHBOARD_AUTH:-}"
@@ -1388,6 +1424,204 @@ git_report() {
     esac
   done
   return 0
+}
+
+# --- single actions ----------------------------------------------------------
+# `crb git push|pull|merge|branch`: one branch of one project, no question.
+# They return 0 (done), 3 (refused, nothing changed) or 1 (failed); the host
+# agent maps these to the outcome it reports.
+
+# git_valid_name NAME: a branch name the single actions accept.
+git_valid_name() {
+  local n=$1
+  [ -n "$n" ] && [ ${#n} -le 100 ] || return 1
+  [[ "$n" =~ ^[A-Za-z0-9._/-]+$ ]] || return 1
+  case "$n" in -*) return 1 ;; esac
+  git check-ref-format --branch "$n" >/dev/null 2>&1 </dev/null
+}
+
+# git_refuse TEXT...: why nothing was done, folded for a phone.
+git_refuse() { printf '%s\n' "$@" | fold -s -w 38 | sed -e 's/[[:space:]]*$//' -e '1s/^/✗ /' -e '2,$s/^/  /'; }
+
+# git_default: the default branch of origin in GS_WS as "origin/<name>", or empty.
+git_default() {
+  local def="" c=""
+  def=$(gq -C "$GS_WS" symbolic-ref -q --short refs/remotes/origin/HEAD || true)
+  if [ -z "$def" ]; then
+    for c in origin/main origin/master; do
+      if gq -C "$GS_WS" show-ref --verify -q "refs/remotes/$c"; then def=$c; break; fi
+    done
+  fi
+  echo "$def"
+}
+
+# git_find BRANCH: loads the scanned row of BRANCH into R_*; fails when there is none.
+git_find() {
+  local row=""
+  [ ${#GS_ROWS[@]} -gt 0 ] || return 1
+  for row in "${GS_ROWS[@]}"; do
+    git_row "$row"
+    if [ "$R_B" = "$1" ]; then return 0; fi
+  done
+  return 1
+}
+
+# git_can_merge_tree: `git merge-tree --write-tree` needs Git 2.38.
+git_can_merge_tree() {
+  local maj=0 min=0
+  read -r maj min <<<"$(git version | sed -E 's/^git version ([0-9]+)\.([0-9]+).*/\1 \2/')"
+  [[ "$maj" =~ ^[0-9]+$ ]] && [[ "$min" =~ ^[0-9]+$ ]] || return 1
+  [ "$maj" -gt 2 ] || { [ "$maj" -eq 2 ] && [ "$min" -ge 38 ]; }
+}
+
+# git_single_pushpull ACT BRANCH: the sync rule for one branch, one direction.
+git_single_pushpull() {
+  local act=$1 b=$2
+  if ! git_find "$b"; then git_refuse "Branch $b gibt es nicht."; return 3; fi
+  case "$act:$R_KIND" in
+    push:push|push:pushnew|pull:ff)
+      if git_apply; then git_line "✓" "$R_B" "$GA_TEXT"; return 0; fi
+      git_line "✗" "$R_B" "$GA_TEXT"; git_note "$GA_ERR"
+      return 1 ;;
+  esac
+  git_line "!" "$R_B" "$R_TEXT"
+  case "$R_KIND" in
+    equal|empty) if [ "$act" = push ]; then git_note "Aktuell, nichts zu pushen."; else git_note "Aktuell, nichts zu holen."; fi ;;
+    ff) git_note "Nur hinter origin, nichts zu pushen." ;;
+    push|pushnew) git_note "Nur vor origin, nichts zu holen." ;;
+    *) git_note "$R_NOTE" ;;
+  esac
+  return 3
+}
+
+# git_single_merge BRANCH: merges BRANCH into origin's default branch and
+# pushes the result. The merge is computed without a working tree and pushed
+# before any local ref moves, so a conflict or a rejected push changes nothing.
+git_single_merge() {
+  local src=$1 def="" d="" base="" tip="" n=0 own=0 result="" how="" out="" rc=0 err="" old=""
+  def=$(git_default)
+  if [ -z "$def" ]; then git_refuse "origin hat keinen Standard-Branch."; return 3; fi
+  d=${def#origin/}
+  if [ "$src" = "$d" ]; then git_refuse "$d ist der Standard-Branch selbst."; return 3; fi
+  if ! gq -C "$GS_WS" show-ref --verify -q "refs/heads/$src"; then git_refuse "Branch $src gibt es nicht."; return 3; fi
+  base=$(gq -C "$GS_WS" rev-parse "refs/remotes/$def"); tip=$(gq -C "$GS_WS" rev-parse "refs/heads/$src")
+  n=$(gq -C "$GS_WS" rev-list --count "$base..$tip")
+  if [ "$n" -eq 0 ]; then git_refuse "$src hat nichts, was $d fehlt."; return 3; fi
+  if gq -C "$GS_WS" show-ref --verify -q "refs/heads/$d"; then
+    own=$(gq -C "$GS_WS" rev-list --count "$base..refs/heads/$d")
+    if [ "$own" -gt 0 ]; then
+      git_refuse "$d hat $own eigene Commits, die nicht auf origin sind." "Erst pushen oder in einen Branch mitnehmen."
+      return 3
+    fi
+  fi
+  if gq -C "$GS_WS" merge-base --is-ancestor "$base" "$tip"; then
+    result=$tip; how="Fast-Forward"
+  else
+    if ! git_can_merge_tree; then git_refuse "Merge braucht Git 2.38 oder neuer, hier läuft $(git version | cut -d' ' -f3)."; return 3; fi
+    out=$(gq -C "$GS_WS" merge-tree --write-tree --name-only --no-messages "$base" "$tip" 2>&1) || rc=$?
+    if [ "$rc" -eq 1 ]; then
+      git_refuse "Konflikt zwischen $src und $d:"
+      printf '%s\n' "$out" | sed 1d | head -n 10 | menu_cut
+      echo "Nichts geändert."
+      return 3
+    fi
+    if [ "$rc" -ne 0 ]; then git_line "✗" "$src" "Merge fehlgeschlagen"; git_note "$out"; return 1; fi
+    if ! result=$(gq -C "$GS_WS" commit-tree "$(printf '%s\n' "$out" | head -n 1)" -p "$base" -p "$tip" -m "Merge branch '$src'" 2>&1); then
+      git_line "✗" "$src" "Merge fehlgeschlagen"; git_note "$result"; return 1
+    fi
+    how="Merge-Commit"
+  fi
+  if ! err=$(gq -C "$GS_WS" push --quiet origin "$result:refs/heads/$d" 2>&1); then
+    git_line "✗" "$src" "Push abgelehnt"; git_note "${err:-push fehlgeschlagen}"; echo "Nichts geändert."
+    return 1
+  fi
+  git_line "✓" "$src" "in $d gemergt"
+  if [ "$n" -eq 1 ]; then git_note "1 Commit · $how · gepusht"; else git_note "$n Commits · $how · gepusht"; fi
+  # The local default branch follows only where that cannot touch someone's work.
+  if git_find "$d"; then
+    if [ "$R_CHECKED" -eq 0 ]; then
+      old=$(gq -C "$GS_WS" rev-parse "refs/heads/$d")
+      if ! err=$(gq -C "$GS_WS" update-ref -m "crb git merge" "refs/heads/$d" "$result" "$old" 2>&1); then git_note "$d lokal nicht nachgezogen:" "$err"; fi
+    elif [ -z "$R_PATH" ]; then
+      git_note "$d lokal jetzt hinter origin:" "Checkout vom Host nicht erreichbar."
+    elif [ "$R_DIRTY" -eq 1 ]; then
+      git_note "$d lokal jetzt hinter origin:" "lokale Änderungen im Checkout."
+    elif ! err=$(gq --git-dir="$R_ADMIN" --work-tree="$R_PATH" merge --ff-only --quiet "$result" 2>&1); then
+      git_note "$d lokal jetzt hinter origin:" "$err"
+    fi
+  fi
+  return 0
+}
+
+# git_single_branch NAME CARRY: a new branch, checked out in the workspace.
+# CARRY=1 takes the default branch's own commits along and puts that branch
+# back to origin's state; no file changes then.
+git_single_branch() {
+  local name=$1 carry=$2 def="" d="" cur="" base="" n=0 old="" err=""
+  def=$(git_default)
+  if [ -z "$def" ]; then git_refuse "origin hat keinen Standard-Branch."; return 3; fi
+  d=${def#origin/}
+  cur=$(gq -C "$GS_WS" symbolic-ref -q --short HEAD || true)
+  if [ -z "$cur" ]; then git_refuse "Im Workspace ist kein Branch ausgecheckt."; return 3; fi
+  if gq -C "$GS_WS" show-ref --verify -q "refs/heads/$name" || gq -C "$GS_WS" show-ref --verify -q "refs/remotes/origin/$name"; then
+    git_refuse "Den Namen $name gibt es schon."; return 3
+  fi
+  base=$(gq -C "$GS_WS" rev-parse "refs/remotes/$def")
+  if [ "$carry" -eq 1 ]; then
+    if [ "$cur" != "$d" ]; then git_refuse "Mitnehmen geht nur, wenn im Workspace $d ausgecheckt ist (jetzt: $cur)."; return 3; fi
+    n=$(gq -C "$GS_WS" rev-list --count "$base..HEAD")
+    if [ "$n" -eq 0 ]; then git_refuse "$d hat keine eigenen Commits zum Mitnehmen."; return 3; fi
+    old=$(gq -C "$GS_WS" rev-parse "refs/heads/$d")
+    if ! err=$(gq -C "$GS_WS" checkout --quiet --no-track -b "$name" 2>&1); then git_line "✗" "$name" "nicht angelegt"; git_note "$err"; return 1; fi
+    if ! err=$(gq -C "$GS_WS" update-ref -m "crb git branch: carried to $name" "refs/heads/$d" "$base" "$old" 2>&1); then
+      git_line "✗" "$name" "angelegt, $d unverändert"; git_note "$err"; return 1
+    fi
+    git_line "✓" "$name" "angelegt"
+    if [ "$n" -eq 1 ]; then git_note "1 Commit von $d mitgenommen," "$d steht wieder auf origin."; else git_note "$n Commits von $d mitgenommen," "$d steht wieder auf origin."; fi
+    return 0
+  fi
+  if [ -n "$(gq -C "$GS_WS" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    git_refuse "Lokale Änderungen im Workspace." "Erst committen oder verwerfen."; return 3
+  fi
+  if ! err=$(gq -C "$GS_WS" checkout --quiet --no-track -b "$name" "refs/remotes/$def" 2>&1); then git_line "✗" "$name" "nicht angelegt"; git_note "$err"; return 1; fi
+  git_line "✓" "$name" "angelegt"; git_note "von $def, im Workspace ausgecheckt."
+  return 0
+}
+
+# git_single ACT [PROJECT] [BRANCH|NAME] [--carry]: checks the arguments,
+# fetches, and runs the action. Uses GM_NAMES and GM_SRCS of cmd_git.
+git_single() {
+  local act=$1 project="" arg="" carry=0 a="" i="" src="" found=0 rc=0
+  shift
+  for a in "$@"; do
+    case "$a" in
+      --carry) if [ "$act" = branch ]; then carry=1; else git_refuse "--carry gibt es nur für branch."; return 3; fi ;;
+      *) if [ -z "$project" ]; then project=$a; elif [ -z "$arg" ]; then arg=$a; else git_refuse "Zu viele Argumente: $a"; return 3; fi ;;
+    esac
+  done
+  if [ -z "$project" ] || [ -z "$arg" ]; then
+    if [ "$act" = branch ]; then git_refuse "Aufruf: ./crb git branch <projekt> <name> [--carry]"; else git_refuse "Aufruf: ./crb git $act <projekt> <branch>"; fi
+    return 3
+  fi
+  for i in "${!GM_NAMES[@]}"; do
+    if [ "${GM_NAMES[$i]}" = "$project" ]; then src=${GM_SRCS[$i]}; found=1; fi
+  done
+  if [ "$found" -eq 0 ]; then git_refuse "Unbekanntes Projekt: $project"; return 3; fi
+  if ! git_valid_name "$arg"; then git_refuse "Kein gültiger Branch-Name: $arg"; return 3; fi
+  git_scan "$src" 1
+  case "$GS_STATUS" in
+    ok) ;;
+    fetch-failed) echo "$project · Fetch fehlgeschlagen"; git_note "$GS_MSG"; git_note "Nichts geändert."; return 1 ;;
+    missing) git_refuse "$project: Ordner fehlt ($GS_MSG)."; return 3 ;;
+    unsupported) git_refuse "$project: nicht unterstützt, das Git-Verzeichnis liegt außerhalb des Workspace."; return 3 ;;
+    *) git_refuse "$project: $(git_status_text)."; return 3 ;;
+  esac
+  case "$act" in
+    push|pull) git_single_pushpull "$act" "$arg" || rc=$? ;;
+    merge) git_single_merge "$arg" || rc=$? ;;
+    branch) git_single_branch "$arg" "$carry" || rc=$? ;;
+  esac
+  return "$rc"
 }
 
 # --- menu ----------------------------------------------------------------------
@@ -1708,9 +1942,13 @@ menu_projects() {
 cmd_git() {
   GIT_MODE=status
   GIT_N_PUSH=0; GIT_N_FF=0; GIT_N_OPEN=0; GIT_N_FAIL=0; GIT_N_PLAN=0; GIT_STAR=0
-  local fetch=1 list=0 menu=0
-  if [ "${1-}" = sync ]; then GIT_MODE=sync; shift; fi
-  local -a want=()
+  local fetch=1 list=0 menu=0 single=""
+  local -a want=() single_args=()
+  case "${1-}" in
+    sync) GIT_MODE=sync; shift ;;
+    # Everything after a single action belongs to it; it has no options of the overview.
+    push|pull|merge|branch) single=$1; shift; if [ $# -gt 0 ]; then single_args=("$@"); fi; set -- ;;
+  esac
   while [ $# -gt 0 ]; do
     case "$1" in
       --no-fetch) fetch=0 ;;
@@ -1774,6 +2012,12 @@ cmd_git() {
     GM_NAMES+=("${names[$i]}"); GM_SRCS+=("${srcs[$i]}"); GM_SUMS+=(""); GM_FAILED+=(0); GM_MSGS+=("")
   done
 
+  if [ -n "$single" ]; then
+    local single_rc=0
+    if [ ${#single_args[@]} -gt 0 ]; then git_single "$single" "${single_args[@]}" || single_rc=$?; else git_single "$single" || single_rc=$?; fi
+    exit "$single_rc"
+  fi
+
   if [ "$menu" -eq 1 ]; then
     local rc=0
     menu_fetch_all "$fetch"
@@ -1803,6 +2047,383 @@ cmd_git() {
 }
 
 # =============================================================================
+# agent
+# =============================================================================
+# The host agent: fetches every project at an interval and carries out the Git
+# actions queued in the dashboard, with the host user's credentials. It asks
+# the dashboard for work; nothing ever connects to it.
+
+AGENT_LOCK=.crb-agent.lock
+AGENT_STATE=.crb-agent.state
+AGENT_UNIT=crb-agent.service
+
+# agent_env_missing: the dashboard service file does not pass CRB_AGENT_TOKEN.
+agent_env_missing() { ! grep -qE '^[[:space:]]+CRB_AGENT_TOKEN:' "$DASHBOARD_FILE"; }
+
+# add_agent_env: adds the line below CRB_STATUS_TOKEN and changes no other line.
+add_agent_env() {
+  local tmp
+  tmp=$(mktemp)
+  LINE_TO_ADD=$(dashboard_env_line CRB_AGENT_TOKEN) awk '{ print } !done && /^      CRB_STATUS_TOKEN:/ { print ENVIRON["LINE_TO_ADD"]; done = 1 }' "$DASHBOARD_FILE" > "$tmp"
+  cat "$tmp" > "$DASHBOARD_FILE"
+  rm -f "$tmp"
+}
+
+# ensure_agent_token: CRB_AGENT_TOKEN in .env, generated when missing. Not the
+# boxes' token: a box must not be able to act as the agent.
+ensure_agent_token() {
+  if [ -n "$(env_get CRB_AGENT_TOKEN)" ]; then return 0; fi
+  local token
+  token=$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
+  [ ${#token} -ge 32 ] || die "Konnte kein Token erzeugen."
+  env_set CRB_AGENT_TOKEN "$token"
+}
+
+# agent_check: what every form of `crb agent` needs. Changes nothing.
+agent_check() {
+  if [ "$(id -u)" -eq 0 ]; then die "Bitte nicht als root ausführen: Dateien im Repository gehören sonst root."; fi
+  command -v git >/dev/null 2>&1 || die "git ist nicht installiert."
+  command -v curl >/dev/null 2>&1 || die "curl ist nicht installiert."
+  [ -f compose.yaml ] || die "Hier liegt keine compose.yaml. Bitte im Ordner der Installation ausführen."
+  if [ ! -f box.yaml ] || [ ! -d services ]; then
+    die "crb agent braucht das services/-Layout (box.yaml und services/<name>.yaml). Diese Installation führt ihre Services in compose.yaml."
+  fi
+}
+
+# agent_base: where the dashboard is published on this machine.
+agent_base() {
+  local bind
+  bind=$(env_get CRB_DASHBOARD_BIND)
+  bind=${bind:-127.0.0.1:8080}
+  case "$bind" in
+    *:*) ;;
+    *) bind="127.0.0.1:$bind" ;;
+  esac
+  case "$bind" in 0.0.0.0:*) bind="127.0.0.1:${bind#0.0.0.0:}" ;; esac
+  echo "http://$bind"
+}
+
+# agent_pid: the PID of the agent that holds the lock, when it is alive.
+agent_pid() {
+  local pid=""
+  [ -f "$AGENT_LOCK/pid" ] || return 1
+  pid=$(cat "$AGENT_LOCK/pid" 2>/dev/null || true)
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  echo "$pid"
+}
+
+agent_log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+# agent_save: what `crb agent status` reads.
+agent_save() { printf 'fetch=%s\nlink=%s\n' "$AG_FETCHED" "$AG_LINK" > "$AGENT_STATE"; }
+
+# agent_link STATE TEXT: logs a change of the connection to the dashboard once.
+agent_link() {
+  if [ "$AG_LINK" = "$1" ]; then return 0; fi
+  AG_LINK=$1
+  agent_log "$2"
+  agent_save
+}
+
+# agent_pause SECONDS: a sleep that a termination signal ends. The tests cap
+# every pause with CRB_AGENT_PAUSE_MAX.
+agent_pause() {
+  local s=$1
+  if [[ "${CRB_AGENT_PAUSE_MAX-}" =~ ^[0-9]+$ ]] && [ "$s" -gt "$CRB_AGENT_PAUSE_MAX" ]; then s=$CRB_AGENT_PAUSE_MAX; fi
+  sleep "$s" &
+  wait $! 2>/dev/null || true
+}
+
+# agent_is_project NAME: a project of this installation, as `crb git` sees them.
+agent_is_project() {
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+  [ "$1" != crb-dashboard ] && [ -f "services/$1.yaml" ] && [ -n "$(service_workspace "services/$1.yaml")" ]
+}
+
+# agent_fetch_round: fetches every project; changes nothing else.
+agent_fetch_round() {
+  local f n src ok=0 failed=0
+  for f in services/*.yaml; do
+    [ -f "$f" ] || continue
+    n=$(basename "$f" .yaml)
+    agent_is_project "$n" || continue
+    src=$(service_workspace "$f")
+    git_scan "$src" 1
+    case "$GS_STATUS" in
+      ok) ok=$((ok + 1)) ;;
+      fetch-failed) failed=$((failed + 1)); agent_log "Fetch $n fehlgeschlagen: $(printf '%s\n' "$GS_MSG" | head -n 1)" ;;
+    esac
+  done
+  AG_FETCHED=$(date +%s)
+  agent_save
+  if [ "$failed" -gt 0 ]; then agent_log "Fetch: $ok ok, $failed fehlgeschlagen"; else agent_log "Fetch: $ok ok"; fi
+}
+
+# agent_act LINE: carries out one collected action and reports the outcome.
+# Every value is checked and then passed as an argument; nothing is evaluated.
+agent_act() {
+  local id="" kind="" project="" branch="" name="" carry="" rest="" outcome="" out="" rc=0 try=0 code=""
+  IFS=$'\t' read -r id kind project branch name carry rest <<<"$1" || true
+  if ! [[ "$id" =~ ^[A-Za-z0-9_-]{1,40}$ ]]; then agent_log "Aktion ohne gültige Kennung verworfen"; return 0; fi
+  if [ "$branch" = "-" ]; then branch=""; fi
+  if [ "$name" = "-" ]; then name=""; fi
+  local -a args=()
+  case "$kind" in
+    fetch) args=(--list "$project") ;;
+    sync) args=(sync "$project") ;;
+    push|pull|merge) args=("$kind" "$project" "$branch") ;;
+    branch) args=(branch "$project" "$name"); if [ "$carry" = 1 ]; then args+=(--carry); fi ;;
+    *) outcome=refused; out="Unbekannte Aktion: ${kind:0:40}" ;;
+  esac
+  if [ -z "$outcome" ] && ! agent_is_project "$project"; then outcome=refused; out="Unbekanntes Projekt: ${project:0:60}"; fi
+  if [ -z "$outcome" ]; then
+    case "$kind" in
+      push|pull|merge) if ! git_valid_name "$branch"; then outcome=refused; out="Kein gültiger Branch-Name."; fi ;;
+      branch) if ! git_valid_name "$name"; then outcome=refused; out="Kein gültiger Branch-Name."; fi ;;
+    esac
+  fi
+  if [ -z "$outcome" ]; then
+    out=$( (cmd_git "${args[@]}") 2>&1 </dev/null) || rc=$?
+    case "$kind:$rc" in
+      *:0) outcome="done" ;;
+      push:3|pull:3|merge:3|branch:3) outcome=refused ;;
+      *) outcome=failed ;;
+    esac
+  fi
+  agent_log "$kind $project ${branch:-$name} -> $outcome"
+  printf '%s\n%s\n' "$outcome" "${out:0:2000}" > "$AG_TMP/report"
+  while [ "$try" -lt 3 ]; do
+    try=$((try + 1))
+    code=$(curl -sS -K "$AG_TMP/curl" -o /dev/null -w '%{http_code}' --max-time 20 -X POST -H 'Content-Type: text/plain; charset=utf-8' --data-binary "@$AG_TMP/report" "$AG_BASE/api/agent/actions/$id" 2>/dev/null) || code=000
+    case "$code" in
+      204) return 0 ;;
+      409) agent_log "Ergebnis von $id kam zu spät, das Dashboard hat die Aktion schon beendet"; return 0 ;;
+    esac
+    agent_pause 2
+  done
+  agent_log "Ergebnis von $id nicht gemeldet (HTTP $code)"
+}
+
+agent_run() {
+  agent_check
+  local token=""
+  token=$(env_get CRB_AGENT_TOKEN)
+  [ -n "$token" ] || die "In .env fehlt CRB_AGENT_TOKEN. Einrichten mit: ./crb agent install"
+
+  # One agent per installation. A re-exec after an update keeps the PID and
+  # with it the lock; a lock whose process is gone is taken over.
+  local holder=""
+  if ! mkdir "$AGENT_LOCK" 2>/dev/null; then
+    holder=$(agent_pid || true)
+    if [ -n "$holder" ] && [ "$holder" != "$$" ]; then die "Hier läuft schon ein Agent (PID $holder)."; fi
+  fi
+  echo "$$" > "$AGENT_LOCK/pid"
+
+  AG_TMP=$(mktemp -d)
+  chmod 700 "$AG_TMP"
+  # The token goes to curl through a file, not through the process list.
+  printf 'header = "Authorization: Bearer %s"\n' "$token" > "$AG_TMP/curl"
+  AG_STOP=0
+  trap 'rm -rf "$AG_TMP" "$AGENT_LOCK"' EXIT
+  trap 'AG_STOP=1' TERM INT
+
+  export GIT_TERMINAL_PROMPT=0
+  export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=10}"
+  export GIT_OPTIONAL_LOCKS=0
+  export GIT_EDITOR=true
+
+  local self="" sum="" interval="" minutes=""
+  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  sum=$(cksum < "$self")
+  minutes=$(env_get CRB_AGENT_FETCH_MINUTES)
+  if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$minutes" -lt 1 ]; then minutes=5; fi
+  interval=$((minutes * 60))
+  # For the tests: an interval in seconds.
+  if [[ "${CRB_AGENT_FETCH_SECONDS-}" =~ ^[0-9]+$ ]]; then interval=$CRB_AGENT_FETCH_SECONDS; fi
+
+  AG_BASE=$(agent_base)
+  AG_LINK=""; AG_FETCHED=""
+  agent_log "Agent gestartet: $(pwd), Dashboard $AG_BASE, Fetch alle ${interval}s"
+
+  local next_fetch=0 now=0 code="" pid="" wait_s=5 line=""
+  while [ "$AG_STOP" -eq 0 ]; do
+    now=$(date +%s)
+    if [ "$now" -ge "$next_fetch" ]; then
+      agent_fetch_round
+      next_fetch=$(( $(date +%s) + interval ))
+    fi
+    if [ "$AG_STOP" -ne 0 ]; then break; fi
+
+    # A replaced script (./crb update) is picked up between two actions.
+    if [ "$(cksum < "$self" 2>/dev/null || true)" != "$sum" ] && bash -n "$self" 2>/dev/null; then
+      agent_log "Neues Skript, Agent startet damit neu"
+      rm -rf "$AG_TMP"
+      trap - EXIT
+      exec "$self" agent
+    fi
+
+    : > "$AG_TMP/next"
+    curl -sS -K "$AG_TMP/curl" -o "$AG_TMP/next" -w '%{http_code}' --max-time 35 -X POST "$AG_BASE/api/agent/next" > "$AG_TMP/code" 2>/dev/null &
+    pid=$!
+    wait "$pid" 2>/dev/null || true
+    if [ "$AG_STOP" -ne 0 ]; then kill "$pid" 2>/dev/null || true; break; fi
+    code=$(cat "$AG_TMP/code" 2>/dev/null || true)
+    case "$code" in
+      200)
+        agent_link ok "Dashboard erreichbar"; wait_s=5
+        line=$(head -n 1 "$AG_TMP/next")
+        agent_act "$line" ;;
+      204) agent_link ok "Dashboard erreichbar"; wait_s=5 ;;
+      401|403)
+        agent_link denied "Das Dashboard lehnt das Token ab (HTTP $code). Stimmt CRB_AGENT_TOKEN in .env mit dem des Dashboards überein? Sonst: docker compose up -d crb-dashboard"
+        agent_pause 30 ;;
+      *)
+        agent_link down "Dashboard nicht erreichbar ($AG_BASE)"
+        agent_pause "$wait_s"
+        wait_s=$((wait_s * 2)); if [ "$wait_s" -gt 30 ]; then wait_s=30; fi ;;
+    esac
+  done
+  agent_log "Agent beendet"
+}
+
+# agent_systemd: this user has a service manager.
+agent_systemd() { command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; }
+
+agent_unit_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$AGENT_UNIT"; }
+
+agent_install() {
+  agent_check
+  [ -f "$DASHBOARD_FILE" ] || die "Das Dashboard ist noch nicht angelegt. Zuerst: ./crb dashboard"
+  banner "Host-Agent einrichten"
+  local dir="" unit="" other="" need_token=0 need_env=0 by_crb=0 systemd=0
+  dir=$(pwd)
+  unit=$(agent_unit_file)
+  if agent_systemd; then systemd=1; fi
+  if [ "$systemd" -eq 1 ] && [ -f "$unit" ]; then
+    other=$(sed -n 's/^WorkingDirectory=//p' "$unit" | head -n 1)
+    if [ -n "$other" ] && [ "$other" != "$dir" ]; then
+      die "Der Dienst $AGENT_UNIT gehört schon zur Installation $other. Nichts geändert. Dort entfernen mit: ./crb agent uninstall"
+    fi
+  fi
+  if [ -z "$(env_get CRB_AGENT_TOKEN)" ]; then need_token=1; fi
+  if agent_env_missing; then need_env=1; fi
+  if dashboard_by_crb; then by_crb=1; fi
+
+  echo "Der Agent holt regelmäßig den Stand von origin und führt die Git-Aktionen"
+  echo "aus, die du im Dashboard antippst: mit deinen Git-Zugangsdaten, ohne Rückfrage."
+  echo ""
+  echo "Geplant:"
+  if [ "$need_token" -eq 1 ]; then echo "  .env: CRB_AGENT_TOKEN wird erzeugt"; fi
+  if [ "$need_env" -eq 1 ] && [ "$by_crb" -eq 1 ]; then echo "  $DASHBOARD_FILE: CRB_AGENT_TOKEN"; fi
+  if [ "$need_token" -eq 1 ] || [ "$need_env" -eq 1 ]; then echo "  Dashboard wird neu gestartet"; fi
+  if [ "$systemd" -eq 1 ]; then echo "  Dienst: $unit"; else echo "  Kein Dienst: hier gibt es keinen systemd für Benutzer"; fi
+  if [ "$need_env" -eq 1 ] && [ "$by_crb" -eq 0 ]; then
+    echo ""
+    echo "$DASHBOARD_FILE ist nicht von crb angelegt und bleibt unverändert."
+    echo "Unter environment: eintragen:"
+    dashboard_env_line CRB_AGENT_TOKEN
+  fi
+  echo ""
+  if ! confirm "Einrichten?"; then echo "Nichts geändert."; return 0; fi
+
+  ensure_agent_token
+  if [ "$need_env" -eq 1 ] && [ "$by_crb" -eq 1 ]; then add_agent_env; fi
+  if [ "$need_token" -eq 1 ] || [ "$need_env" -eq 1 ]; then
+    check_host
+    docker compose up -d crb-dashboard </dev/null || warn "Das Dashboard ließ sich nicht neu starten. Von Hand: docker compose up -d crb-dashboard"
+  fi
+
+  if [ "$systemd" -eq 0 ]; then
+    echo ""
+    echo "Kein Dienst installiert. Der Agent läuft, solange dieser Befehl läuft:"
+    echo "  ./crb agent"
+    return 0
+  fi
+  mkdir -p "$(dirname "$unit")"
+  cat > "$unit" <<UNIT
+[Unit]
+Description=claude-remote-box host agent ($dir)
+
+[Service]
+WorkingDirectory=$dir
+ExecStart=$dir/crb agent
+Restart=always
+RestartSec=5
+# Only the agent gets the signal, so a running push or merge finishes.
+KillMode=mixed
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target
+UNIT
+  systemctl --user daemon-reload
+  systemctl --user enable "$AGENT_UNIT" >/dev/null 2>&1 || warn "Der Dienst ließ sich nicht aktivieren."
+  systemctl --user restart "$AGENT_UNIT" || die "Der Dienst ließ sich nicht starten. Siehe: journalctl --user -u $AGENT_UNIT"
+  echo ""
+  echo "✅ Der Agent läuft als Dienst $AGENT_UNIT."
+  echo "   Protokoll: journalctl --user -u $AGENT_UNIT -f"
+  if command -v loginctl >/dev/null 2>&1 && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
+    echo ""
+    warn "Dienste dieses Benutzers enden, wenn er sich abmeldet. Damit der Agent"
+    echo "   auch ohne Anmeldung und nach einem Neustart läuft:"
+    echo "   sudo loginctl enable-linger $(id -un)"
+  fi
+  echo ""
+  echo "Git braucht Zugangsdaten, die ohne Eingabe funktionieren (SSH-Schlüssel"
+  echo "ohne Passphrase oder ein Credential-Helper). Prüfen: ./crb git --list"
+}
+
+agent_uninstall() {
+  local unit=""
+  unit=$(agent_unit_file)
+  if ! agent_systemd || [ ! -f "$unit" ]; then echo "Kein Dienst $AGENT_UNIT installiert."; return 0; fi
+  systemctl --user disable --now "$AGENT_UNIT" >/dev/null 2>&1 || true
+  rm -f "$unit"
+  systemctl --user daemon-reload || true
+  echo "✅ Dienst $AGENT_UNIT entfernt. .env und $DASHBOARD_FILE bleiben, wie sie sind."
+}
+
+agent_status() {
+  [ -f compose.yaml ] || die "Hier liegt keine compose.yaml. Bitte im Ordner der Installation ausführen."
+  local unit="" pid="" fetched="" link=""
+  unit=$(agent_unit_file)
+  if agent_systemd && [ -f "$unit" ]; then
+    echo "Dienst:    installiert, $(systemctl --user is-active "$AGENT_UNIT" 2>/dev/null || true)"
+  else
+    echo "Dienst:    nicht installiert"
+  fi
+  pid=$(agent_pid || true)
+  if [ -n "$pid" ]; then echo "Agent:     läuft (PID $pid)"; else echo "Agent:     läuft nicht"; fi
+  if [ -f "$AGENT_STATE" ]; then
+    fetched=$(sed -n 's/^fetch=//p' "$AGENT_STATE"); link=$(sed -n 's/^link=//p' "$AGENT_STATE")
+  fi
+  if [[ "$fetched" =~ ^[0-9]+$ ]]; then echo "Fetch:     vor $(( ($(date +%s) - fetched) / 60 )) min"; else echo "Fetch:     noch keiner"; fi
+  case "$link" in
+    ok) echo "Dashboard: erreichbar" ;;
+    denied) echo "Dashboard: lehnt das Token ab" ;;
+    down) echo "Dashboard: nicht erreichbar" ;;
+    *) echo "Dashboard: noch kein Kontakt" ;;
+  esac
+  if [ -z "$pid" ]; then
+    echo ""
+    echo "Starten: ./crb agent install (als Dienst) oder ./crb agent (im Vordergrund)"
+    exit 1
+  fi
+}
+
+cmd_agent() {
+  if [ $# -gt 1 ]; then usage >&2; exit 64; fi
+  case "${1-}" in
+    "") agent_run ;;
+    install) agent_install ;;
+    uninstall) agent_uninstall ;;
+    status) agent_status ;;
+    *) usage >&2; exit 64 ;;
+  esac
+}
+
+# =============================================================================
 
 main() {
   local cmd=${1-}
@@ -1812,6 +2433,7 @@ main() {
     update) cmd_update "$@" ;;
     dashboard) cmd_dashboard "$@" ;;
     git) cmd_git "$@" ;;
+    agent) cmd_agent "$@" ;;
     *) usage >&2; exit 64 ;;
   esac
 }

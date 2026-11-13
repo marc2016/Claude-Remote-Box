@@ -793,6 +793,341 @@ rec_before=$(records "$W")
 gitmenu "$D" '2\n2\ny\nq\n' dv
 check "rebased in the worktree on the host, record unchanged" 'out | grep -q "^dv · wt$" && out | grep -q "^✓ Rebase fertig\.$" && [ "$(git -C "$W" log --format=%s -n 2 wt | tr "\n" "|")" = "wt local|wt remote|" ] && grep -q remote "$W/.claude/worktrees/calm/f.txt" && [ "$(records "$W")" = "$rec_before" ]'
 
+# --- git single actions ------------------------------------------------------
+
+# sfx DIR: project "sx" with origin, workspace W on main, and a second clone X.
+sfx() {
+  local D=$1
+  O="$D/origin.git"; W="$D/sx/workspace"; X="$D/other"
+  mkdir -p "$D"; cp "$BASE/compose.yaml" "$BASE/box.yaml" "$D/"
+  git init -q "$D/seed"; echo one >"$D/seed/f.txt"; echo one >"$D/seed/g.txt"; git -C "$D/seed" add .; git -C "$D/seed" commit -q -m init
+  git clone -q --bare "$D/seed" "$O"; git clone -q "$O" "$W"; git clone -q "$O" "$X"
+  service "$D" sx ../sx/workspace
+}
+# sbranch NAME FILE N: branch NAME in a worktree of W with N commits changing FILE.
+sbranch() {
+  local i=0
+  git -C "$W" worktree add -q -b "$1" "$W/.claude/worktrees/$1" main >/dev/null 2>&1
+  while [ "$i" -lt "$3" ]; do i=$((i + 1)); echo "$1 $i" >>"$W/.claude/worktrees/$1/$2"; git -C "$W/.claude/worktrees/$1" commit -q -am "$1 $i"; done
+}
+# rchange FILE: one commit on origin's main changing FILE.
+rchange() { git -C "$X" fetch -q origin; git -C "$X" checkout -q -B main origin/main; echo remote >>"$X/$1"; git -C "$X" commit -q -am "remote $1"; git -C "$X" push -q origin main; }
+sstate() { git -C "$W" for-each-ref --format='%(refname) %(objectname)' refs/heads; git -C "$O" for-each-ref --format='%(refname) %(objectname)'; git -C "$W" status --porcelain; git -C "$W" symbolic-ref HEAD; find "$W" -path "$W/.git" -prune -o -type f -exec cksum {} + | sort; }
+
+echo "Git single actions: arguments"
+D="$WORK/t-s0"; sfx "$D"; before=$(sstate)
+gitcmd "$D" push
+check "missing arguments: 3, usage, nothing fetched" '[ "$(rc)" -eq 3 ] && out | tr "\n" " " | grep -q "Aufruf: ./crb git push <projekt>  *<branch>" && [ ! -e "$W/.git/FETCH_HEAD" ]'
+gitcmd "$D" push nope main
+check "unknown project: 3" '[ "$(rc)" -eq 3 ] && out | grep -q "Unbekanntes Projekt: nope"'
+for bad in "-x" "a..b" "a b" 'x; touch pwned'; do
+  gitcmd "$D" branch sx "$bad"
+  check "invalid name '$bad': 3, nothing changed" '[ "$(rc)" -eq 3 ] && out | grep -q "Kein gültiger Branch-Name" && [ "$(sstate)" = "$before" ] && [ ! -e "$D/pwned" ]'
+done
+gitcmd "$D" push sx main --carry
+check "--carry only for branch" '[ "$(rc)" -eq 3 ]'
+git -C "$W" remote set-url origin "ssh://git@127.0.0.1:1/none.git"
+gitcmd "$D" push sx main
+check "failed fetch: 1, nothing changed" '[ "$(rc)" -eq 1 ] && out | grep -q "Fetch fehlgeschlagen" && out | grep -q "Nichts geändert"'
+
+echo "Git single actions: push and pull"
+D="$WORK/t-s1"; sfx "$D"; sbranch calm-clock f.txt 2; sbranch other-b g.txt 1
+gitcmd "$D" push sx calm-clock
+check "push one new branch: on origin with upstream, the other not" '[ "$(rc)" -eq 0 ] && out | grep -q "^✓ calm-clock" && [ "$(ref "$O" calm-clock)" = "$(ref "$W" calm-clock)" ] && [ "$(git -C "$W" rev-parse --abbrev-ref calm-clock@{upstream})" = origin/calm-clock ] && [ -z "$(ref "$O" other-b)" ]'
+gitcmd "$D" push sx main
+check "nothing to push: 3, says up to date" '[ "$(rc)" -eq 3 ] && out | grep -q "Aktuell, nichts zu pushen"'
+gitcmd "$D" push sx nope
+check "unknown branch: 3" '[ "$(rc)" -eq 3 ] && out | grep -q "Branch nope gibt es nicht"'
+rchange f.txt; echo edit >>"$W/g.txt"; git -C "$W" fetch -q origin; before=$(sstate)
+gitcmd "$D" pull sx main
+check "pull blocked by local changes: 3, as before" '[ "$(rc)" -eq 3 ] && out | grep -q "lokale Änderungen" && [ "$(sstate)" = "$before" ]'
+git -C "$W" checkout -q -- g.txt
+gitcmd "$D" pull sx main
+check "pull: fast-forwarded with files" '[ "$(rc)" -eq 0 ] && [ "$(ref "$W" main)" = "$(ref "$O" main)" ] && grep -q remote "$W/f.txt"'
+ci "$W" "local"; rchange g.txt; o_before=$(ref "$O" main)
+gitcmd "$D" push sx main
+check "diverged: 3, nothing pushed" '[ "$(rc)" -eq 3 ] && out | grep -q "divergiert" && [ "$(ref "$O" main)" = "$o_before" ]'
+
+echo "Git single actions: merge"
+D="$WORK/t-m1"; sfx "$D"; sbranch calm-clock g.txt 2; rchange f.txt; o_before=$(ref "$O" main); c_before=$(ref "$W" calm-clock)
+container_path "$W" calm-clock /workspace/.claude/worktrees/calm-clock; rec_before=$(records "$W")
+gitcmd "$D" merge sx calm-clock
+check "merge commit with both parents on origin" '[ "$(rc)" -eq 0 ] && out | grep -q "^✓ calm-clock *in main gemergt" && out | grep -q "2 Commits · Merge-Commit · gepusht" && [ "$(git -C "$O" rev-list --parents -n 1 main)" = "$(ref "$O" main) $o_before $c_before" ]'
+check "workspace on main follows with files, branch and records as before" '[ "$(ref "$W" main)" = "$(ref "$O" main)" ] && grep -q "calm-clock 2" "$W/g.txt" && grep -q remote "$W/f.txt" && [ -z "$(git -C "$W" status --porcelain --untracked-files=no)" ] && [ "$(ref "$W" calm-clock)" = "$c_before" ] && [ "$(records "$W")" = "$rec_before" ]'
+gitcmd "$D" merge sx calm-clock
+check "nothing left to merge: 3" '[ "$(rc)" -eq 3 ] && out | grep -q "hat nichts, was main fehlt"'
+gitcmd "$D" merge sx main
+check "default branch itself: 3" '[ "$(rc)" -eq 3 ]'
+gitcmd "$D" merge sx nope
+check "unknown branch: 3" '[ "$(rc)" -eq 3 ] && out | grep -q "Branch nope gibt es nicht"'
+
+D="$WORK/t-m2"; sfx "$D"; sbranch calm-clock g.txt 2; o_before=$(ref "$O" main)
+echo wip >>"$W/.claude/worktrees/calm-clock/f.txt"
+gitcmd "$D" merge sx calm-clock
+check "fast-forward: no merge commit, uncommitted work stays out and in place" '[ "$(rc)" -eq 0 ] && out | grep -q "Fast-Forward" && [ "$(ref "$O" main)" = "$(ref "$W" calm-clock)" ] && [ "$(ref "$W" main)" = "$(ref "$O" main)" ] && ! git -C "$O" show main:f.txt | grep -q wip && grep -q wip "$W/.claude/worktrees/calm-clock/f.txt"'
+
+D="$WORK/t-m3"; sfx "$D"; sbranch calm-clock g.txt 1; rchange g.txt; git -C "$W" fetch -q origin; before=$(sstate)
+gitcmd "$D" merge sx calm-clock
+check "conflict: 3, file named, nothing changed" '[ "$(rc)" -eq 3 ] && out | grep -q "Konflikt" && out | grep -q "g.txt" && [ "$(sstate)" = "$before" ]'
+
+D="$WORK/t-m4"; sfx "$D"; sbranch calm-clock g.txt 1; rchange f.txt; git -C "$W" checkout -q -b feature/nav; files_before=$(cat "$W/f.txt" "$W/g.txt")
+gitcmd "$D" merge sx calm-clock
+check "default branch not checked out: ref moved, workspace files unchanged" '[ "$(rc)" -eq 0 ] && [ "$(ref "$W" main)" = "$(ref "$O" main)" ] && [ "$(cat "$W/f.txt" "$W/g.txt")" = "$files_before" ] && [ "$(git -C "$W" symbolic-ref --short HEAD)" = feature/nav ]'
+
+D="$WORK/t-m5"; sfx "$D"; sbranch calm-clock g.txt 1; echo edit >>"$W/f.txt"; m_before=$(ref "$W" main)
+gitcmd "$D" merge sx calm-clock
+check "workspace with local changes: origin moved, local main and files as before, said so" '[ "$(rc)" -eq 0 ] && [ "$(ref "$O" main)" = "$(ref "$W" calm-clock)" ] && [ "$(ref "$W" main)" = "$m_before" ] && grep -q edit "$W/f.txt" && out | grep -q "main lokal jetzt hinter" && out | grep -q "lokale Änderungen"'
+
+D="$WORK/t-m6"; sfx "$D"; sbranch calm-clock g.txt 1; ci "$W" "own"; before=$(sstate)
+gitcmd "$D" merge sx calm-clock
+check "unpushed commits on main: 3, nothing changed" '[ "$(rc)" -eq 3 ] && out | grep -q "eigene" && out | grep -q "Erst pushen oder in einen Branch" && [ "$(sstate)" = "$before" ]'
+
+D="$WORK/t-m7"; sfx "$D"; sbranch calm-clock g.txt 1; rchange f.txt; git -C "$W" fetch -q origin
+printf '#!/bin/sh\necho "policy says no" >&2\nexit 1\n' >"$O/hooks/pre-receive"; chmod +x "$O/hooks/pre-receive"; before=$(sstate)
+gitcmd "$D" merge sx calm-clock
+check "rejected push: 1, message shown, nothing changed" '[ "$(rc)" -eq 1 ] && out | grep -q "Push abgelehnt" && out | grep -q "policy says no" && [ "$(sstate)" = "$before" ]'
+
+echo "Git single actions: branch"
+D="$WORK/t-b1"; sfx "$D"; rchange f.txt; rchange f.txt; rchange f.txt; m_before=$(ref "$W" main)
+gitcmd "$D" branch sx feature/nav
+check "fresh branch at origin/main, checked out, main untouched, not pushed, no upstream" '[ "$(rc)" -eq 0 ] && [ "$(git -C "$W" symbolic-ref --short HEAD)" = feature/nav ] && [ "$(ref "$W" HEAD)" = "$(ref "$O" main)" ] && [ "$(ref "$W" main)" = "$m_before" ] && [ -z "$(ref "$O" feature/nav)" ] && ! git -C "$W" rev-parse -q --verify "feature/nav@{upstream}" >/dev/null 2>&1'
+gitcmd "$D" branch sx feature/nav
+check "name taken locally: 3" '[ "$(rc)" -eq 3 ] && out | grep -q "gibt es schon"'
+git -C "$X" push -q origin main:refs/heads/on-origin
+gitcmd "$D" branch sx on-origin
+check "name taken on origin: 3" '[ "$(rc)" -eq 3 ] && out | grep -q "gibt es schon" && [ -z "$(ref "$W" refs/heads/on-origin)" ]'
+echo edit >>"$W/g.txt"; before=$(sstate)
+gitcmd "$D" branch sx second
+check "local changes without carry: 3, as before" '[ "$(rc)" -eq 3 ] && out | grep -q "Lokale Änderungen" && [ "$(sstate)" = "$before" ]'
+
+D="$WORK/t-b2"; sfx "$D"; echo a >>"$W/f.txt"; git -C "$W" commit -q -am "own 1"; echo b >>"$W/f.txt"; git -C "$W" commit -q -am "own 2"; echo edit >>"$W/g.txt"
+h_before=$(ref "$W" HEAD); files_before=$(cat "$W/f.txt" "$W/g.txt")
+gitcmd "$D" branch sx rescue --carry
+check "carry: same commit and files, main back on origin, commits on the new branch" '[ "$(rc)" -eq 0 ] && out | grep -q "2 Commits von main mitgenommen" && [ "$(git -C "$W" symbolic-ref --short HEAD)" = rescue ] && [ "$(ref "$W" HEAD)" = "$h_before" ] && [ "$(cat "$W/f.txt" "$W/g.txt")" = "$files_before" ] && [ "$(ref "$W" main)" = "$(ref "$O" main)" ] && [ "$(git -C "$W" log --format=%s -n 2 rescue | tr "\n" "|")" = "own 2|own 1|" ]'
+check "carry: nothing unreachable" '! git -C "$W" fsck --unreachable --no-reflogs 2>/dev/null | grep -q "unreachable commit"'
+gitcmd "$D" branch sx again --carry
+check "carry from another branch: 3" '[ "$(rc)" -eq 3 ] && out | grep -q "Mitnehmen geht nur" && [ -z "$(ref "$W" refs/heads/again)" ]'
+D="$WORK/t-b3"; sfx "$D"; before=$(sstate)
+gitcmd "$D" branch sx rescue --carry
+check "carry without own commits: 3, nothing changed" '[ "$(rc)" -eq 3 ] && out | grep -q "keine eigenen Commits" && [ "$(sstate)" = "$before" ]'
+git -C "$W" checkout -q --detach
+gitcmd "$D" branch sx fresh
+check "detached workspace: 3" '[ "$(rc)" -eq 3 ] && out | tr "\n" " " | grep -q "kein Branch  *ausgecheckt"'
+check "single actions fit 40 columns" '[ "$(out | widest)" -le 40 ]'
+
+# --- agent -------------------------------------------------------------------
+# A curl stub plays the dashboard: the Nth request for work is answered from
+# $CURL_DIR/next.N (first line the HTTP code, 000 for "not reachable", then the
+# body); without that file it answers 204 after a moment. Reported outcomes
+# land in $CURL_DIR/report.<id>.
+ASTUB="$WORK/astub"; mkdir -p "$ASTUB"
+cat >"$ASTUB/curl" <<'STUB'
+#!/bin/sh
+out=/dev/null; data=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift ;;
+    --data-binary) data=${2#@}; shift ;;
+    -K|-w|--max-time|-X|-H) shift ;;
+    -sS) ;;
+    *) url=$1 ;;
+  esac
+  shift
+done
+case "$url" in
+  */api/agent/next)
+    n=$(cat "$CURL_DIR/count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"$CURL_DIR/count"
+    if [ -f "$CURL_DIR/next.$n" ]; then
+      code=$(head -n 1 "$CURL_DIR/next.$n"); sed 1d "$CURL_DIR/next.$n" >"$out"
+      if [ "$code" = 000 ]; then exit 7; fi
+      printf '%s' "$code"
+    else
+      sleep 0.3; printf 204
+    fi ;;
+  */api/agent/actions/*) cp "$data" "$CURL_DIR/report.${url##*/}"; printf 204 ;;
+esac
+STUB
+chmod +x "$ASTUB/curl"
+REAL_GIT=$(command -v git)
+printf '#!/bin/sh\necho "$*" >>"$GIT_LOG"\nexec "%s" "$@"\n' "$REAL_GIT" >"$ASTUB/git"; chmod +x "$ASTUB/git"
+ALOG="$WORK/agent.log"
+# agent_start DIR [CRB]: starts the agent in the background; its PID is in $APID.
+agent_start() {
+  CURL_DIR="$1/curl"; mkdir -p "$CURL_DIR"; : >"$ALOG"; : >"$WORK/git.log"
+  (cd "$1" && exec env CURL_DIR="$CURL_DIR" GIT_LOG="$WORK/git.log" PATH="$ASTUB:$PATH" CRB_AGENT_FETCH_SECONDS="${AFETCH:-3600}" CRB_AGENT_PAUSE_MAX=0 "${2:-$SCRIPT}" agent) >"$ALOG" 2>&1 &
+  APID=$!
+}
+# agent_wait CONDITION [TENTHS]: waits until the condition holds.
+agent_wait() { local i=0; while ! eval "$1" 2>/dev/null; do i=$((i + 1)); if [ "$i" -gt "${2:-100}" ]; then return 1; fi; sleep 0.1; done; }
+agent_stop() { kill -TERM "$APID" 2>/dev/null; wait "$APID" 2>/dev/null; }
+# job N CODE [LINE]: scripts the Nth request for work.
+job() { printf '%s\n' "$2" >"$CURL_DIR/next.$1"; if [ $# -gt 2 ]; then printf '%b\n' "$3" >>"$CURL_DIR/next.$1"; fi; }
+
+echo "Agent: preconditions"
+D="$WORK/t-a0"; sfx "$D"
+(cd "$D" && "$SCRIPT" agent </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
+check "no token: non-zero, names crb agent install" '[ "$(rc)" -ne 0 ] && out | grep -q "./crb agent install" && [ ! -e "$D/.crb-agent.lock" ]'
+(cd "$D" && "$SCRIPT" agent nope </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
+check "unknown argument: usage, non-zero, nothing started" '[ "$(rc)" -eq 64 ] && out | grep -q "crb agent install|uninstall|status" && [ ! -e "$D/.crb-agent.lock" ]'
+(cd "$D" && PATH="$FAKE/root-only:$PATH" "$SCRIPT" agent </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
+check "root refused" '[ "$(rc)" -ne 0 ] && out | grep -q "nicht als root"'
+(cd "$D" && "$SCRIPT" agent status </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
+check "status without an agent: non-zero, says so" '[ "$(rc)" -ne 0 ] && out | grep -q "Agent:     läuft nicht"'
+
+echo "Agent: carries out actions in order and reports them"
+D="$WORK/t-a1"; sfx "$D"; sbranch calm-clock g.txt 2; sbranch other-b f.txt 1
+echo 'CRB_AGENT_TOKEN=Agent0123456789Agent0123456789Agent01' >"$D/.env"
+CURL_DIR="$D/curl"; mkdir -p "$CURL_DIR"
+job 1 200 'id1\tpush\tsx\tcalm-clock\t-\t0'
+job 2 200 'id2\tmerge\tsx\tother-b\t-\t0'
+job 3 200 'id3\tbranch\tsx\t-\trescue\t0'
+job 4 200 'id4\tfetch\tsx\t-\t-\t0'
+agent_start "$D"
+check "all four reported" 'agent_wait "[ -f \"$CURL_DIR/report.id4\" ]" 300'
+check "push: done with the line of the command, branch on origin" '[ "$(head -n 1 "$CURL_DIR/report.id1")" = done ] && grep -q "^✓ calm-clock" "$CURL_DIR/report.id1" && [ "$(ref "$O" calm-clock)" = "$(ref "$W" calm-clock)" ]'
+check "merge: done, on origin" '[ "$(head -n 1 "$CURL_DIR/report.id2")" = done ] && grep -q "in main gemergt" "$CURL_DIR/report.id2" && [ "$(ref "$O" main)" = "$(ref "$W" other-b)" ]'
+check "branch: done, checked out" '[ "$(head -n 1 "$CURL_DIR/report.id3")" = done ] && [ "$(git -C "$W" symbolic-ref --short HEAD)" = rescue ]'
+check "fetch: done with the overview" '[ "$(head -n 1 "$CURL_DIR/report.id4")" = done ] && grep -q "^sx · Fetch ok" "$CURL_DIR/report.id4"'
+check "one log line per action, in the order queued, without the token" '[ "$(grep -n -- "-> " "$ALOG" | cut -d" " -f3- | tr "\n" "|")" = "push sx calm-clock -> done|merge sx other-b -> done|branch sx rescue -> done|fetch sx  -> done|" ] && ! grep -q Agent0123456789 "$ALOG"'
+check "one fetch round logged at start" '[ "$(grep -c " Fetch: 1 ok$" "$ALOG")" -eq 1 ]'
+(cd "$D" && "$SCRIPT" agent </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
+check "second agent: non-zero, says so, the first keeps running" '[ "$(rc)" -ne 0 ] && out | grep -q "läuft schon ein Agent" && kill -0 "$APID"'
+(cd "$D" && "$SCRIPT" agent status </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
+check "status with an agent: 0, fetch and dashboard shown" '[ "$(rc)" -eq 0 ] && out | grep -q "Agent:     läuft (PID $APID)" && out | grep -q "Fetch:     vor 0 min" && out | grep -q "Dashboard: erreichbar"'
+agent_stop
+check "stopped: says so, lock gone" 'grep -q "Agent beendet" "$ALOG" && [ ! -e "$D/.crb-agent.lock" ]'
+
+echo "Agent: refuses what it does not know, without running Git"
+D="$WORK/t-a2"; mkdir -p "$D/plain"; cp "$BASE/compose.yaml" "$BASE/box.yaml" "$D/"; service "$D" sx ../plain
+echo 'CRB_AGENT_TOKEN=Agent0123456789Agent0123456789Agent01' >"$D/.env"
+CURL_DIR="$D/curl"; mkdir -p "$CURL_DIR"
+job 1 200 'id1\tpush\tnope\tmain\t-\t0'
+job 2 200 'id2\tdelete\tsx\tmain\t-\t0'
+job 3 200 "id3\tbranch\tsx\t-\tx; touch $D/pwned\t0"
+job 4 200 'id4\tpush\t../plain\tmain\t-\t0'
+job 5 200 'bad id\tpush\tsx\tmain\t-\t0'
+job 6 200 'id6\tpush\tcrb-dashboard\tmain\t-\t0'
+agent_start "$D"
+check "all reported" 'agent_wait "[ -f \"$CURL_DIR/report.id6\" ]" 200'
+agent_stop
+check "unknown project refused, named" '[ "$(head -n 1 "$CURL_DIR/report.id1")" = refused ] && grep -q "Unbekanntes Projekt: nope" "$CURL_DIR/report.id1"'
+check "unknown kind refused" '[ "$(head -n 1 "$CURL_DIR/report.id2")" = refused ] && grep -q "Unbekannte Aktion: delete" "$CURL_DIR/report.id2"'
+check "hostile name refused, nothing executed" '[ "$(head -n 1 "$CURL_DIR/report.id3")" = refused ] && [ ! -e "$D/pwned" ]'
+check "path as a project and the dashboard as a project refused" '[ "$(head -n 1 "$CURL_DIR/report.id4")" = refused ] && [ "$(head -n 1 "$CURL_DIR/report.id6")" = refused ]'
+check "action without a usable id dropped" 'grep -q "ohne gültige Kennung" "$ALOG" && [ "$(ls "$CURL_DIR" | grep -c "^report\.")" -eq 5 ]'
+check "no Git command ran" '[ ! -s "$WORK/git.log" ]'
+
+echo "Agent: finishes the running action when it is stopped"
+D="$WORK/t-a3"; sfx "$D"; sbranch calm-clock g.txt 1
+echo 'CRB_AGENT_TOKEN=Agent0123456789Agent0123456789Agent01' >"$D/.env"
+printf '#!/bin/sh\nsleep 2\nexit 0\n' >"$O/hooks/pre-receive"; chmod +x "$O/hooks/pre-receive"
+CURL_DIR="$D/curl"; mkdir -p "$CURL_DIR"
+job 1 200 'id1\tpush\tsx\tcalm-clock\t-\t0'
+agent_start "$D"
+agent_wait 'grep -q "push.*calm-clock" "$WORK/git.log"' 100; sleep 0.3
+agent_stop
+check "push finished and reported, then the agent ended" '[ "$(ref "$O" calm-clock)" = "$(ref "$W" calm-clock)" ] && [ "$(head -n 1 "$CURL_DIR/report.id1")" = done ] && grep -q "Agent beendet" "$ALOG"'
+
+echo "Agent: dashboard not reachable, token rejected"
+D="$WORK/t-a4"; sfx "$D"
+echo 'CRB_AGENT_TOKEN=Agent0123456789Agent0123456789Agent01' >"$D/.env"
+CURL_DIR="$D/curl"; mkdir -p "$CURL_DIR"
+for i in 1 2 3 4 5 6 7 8 9 10; do job "$i" 000; done
+job 11 204; job 12 401; job 13 401; job 14 401; job 15 204
+AFETCH=1 agent_start "$D"
+check "reaches the end of the script" 'agent_wait "[ \"\$(cat \"$CURL_DIR/count\")\" -ge 16 ]" 300'
+agent_wait '[ "$(grep -c " Fetch: 1 ok$" "$ALOG")" -ge 2 ]' 50
+agent_stop
+check "one line per change of state, not per attempt" '[ "$(grep -c "Dashboard nicht erreichbar" "$ALOG")" -eq 1 ] && [ "$(grep -c "Dashboard erreichbar" "$ALOG")" -eq 2 ] && [ "$(grep -c "lehnt das Token ab" "$ALOG")" -eq 1 ]'
+check "keeps fetching meanwhile" '[ "$(grep -c " Fetch: 1 ok$" "$ALOG")" -ge 2 ]'
+D="$WORK/t-a5"; sfx "$D"; git -C "$W" remote set-url origin "ssh://git@127.0.0.1:1/none.git"
+echo 'CRB_AGENT_TOKEN=Agent0123456789Agent0123456789Agent01' >"$D/.env"
+agent_start "$D"
+check "a failed fetch is logged with the project and the agent keeps running" 'agent_wait "grep -q \"Fetch: 0 ok, 1 fehlgeschlagen\" \"$ALOG\"" 300 && grep -q "Fetch sx fehlgeschlagen: " "$ALOG" && kill -0 "$APID"'
+agent_stop
+
+echo "Agent: picks up a new script"
+D="$WORK/t-a6"; sfx "$D"; sbranch calm-clock g.txt 1
+echo 'CRB_AGENT_TOKEN=Agent0123456789Agent0123456789Agent01' >"$D/.env"
+mkdir -p "$WORK/abin"; cp "$SCRIPT" "$WORK/abin/crb"; chmod 755 "$WORK/abin/crb"
+agent_start "$D" "$WORK/abin/crb"
+agent_wait 'grep -q "Agent gestartet" "$ALOG"' 100
+sed 's/Agent gestartet:/Agent neu gestartet:/' "$SCRIPT" >"$WORK/abin/crb.new"; chmod 755 "$WORK/abin/crb.new"; mv "$WORK/abin/crb.new" "$WORK/abin/crb"
+check "continues as the new script, same process, lock held" 'agent_wait "grep -q \"Agent neu gestartet\" \"$ALOG\"" 100 && kill -0 "$APID" && [ "$(cat "$D/.crb-agent.lock/pid")" = "$APID" ]'
+job "$(( $(cat "$CURL_DIR/count" 2>/dev/null || echo 0) + 2 ))" 200 'id1\tpush\tsx\tcalm-clock\t-\t0'
+check "and still carries out actions" 'agent_wait "[ -f \"$CURL_DIR/report.id1\" ]" 100 && [ "$(head -n 1 "$CURL_DIR/report.id1")" = done ]'
+agent_stop
+
+echo "Agent: token and service installation"
+check "a new dashboard service passes the agent token, empty by default" 'grep -qF "CRB_AGENT_TOKEN: \"\${CRB_AGENT_TOKEN:-}\"" "$WORK/dash.new"'
+SSTUB="$WORK/sstub"; mkdir -p "$SSTUB"
+cat >"$SSTUB/systemctl" <<'STUB'
+#!/bin/sh
+echo "systemctl $*" >>"$SYS_LOG"
+case "$*" in
+  "--user show-environment") [ -z "${NO_USER_MANAGER-}" ] || exit 1 ;;
+  "--user is-active"*) echo active ;;
+esac
+exit 0
+STUB
+printf '#!/bin/sh\necho "loginctl $*" >>"$SYS_LOG"\necho "${LINGER:-no}"\n' >"$SSTUB/loginctl"
+chmod +x "$SSTUB/systemctl" "$SSTUB/loginctl"
+UNIT="$HOME/.config/systemd/user/crb-agent.service"
+# agentcmd DIR ANSWERS ARG: runs `crb agent ARG` with the service manager and docker stubbed.
+agentcmd() {
+  local dir=$1 answers=$2
+  : >"$WORK/docker.log"; : >"$WORK/sys.log"
+  printf 'running\n' >"$WORK/answers/ps"
+  (cd "$dir" && printf '%b' "$answers" | DOCKER_LOG="$WORK/docker.log" STUB_DIR="$WORK/answers" SYS_LOG="$WORK/sys.log" PATH="$SSTUB:$LSTUB:$PATH" "$SCRIPT" agent "$3") >"$WORK/out" 2>&1
+  echo $? >"$WORK/rc"
+}
+D="$WORK/t-agent"; cp -R "$WORK/t-dash" "$D"; DF="$D/services/crb-dashboard.yaml"; cp "$WORK/dash.new" "$DF"
+sed -i.bak "/CRB_AGENT_TOKEN:/d" "$DF"; rm -f "$DF.bak"; cp "$DF" "$WORK/dash.noagent"; cp "$D/.env" "$WORK/env.before"
+agentcmd "$D" '\n' install
+check "declined: .env, service file and services as before" '[ "$(rc)" -eq 0 ] && out | grep -q "Nichts geändert" && cmp -s "$D/.env" "$WORK/env.before" && cmp -s "$DF" "$WORK/dash.noagent" && [ ! -e "$UNIT" ] && ! grep -q "enable\|restart" "$WORK/sys.log"'
+check "plan lists token, service file, restart and unit" 'out | grep -q "CRB_AGENT_TOKEN wird erzeugt" && out | grep -q "services/crb-dashboard.yaml: CRB_AGENT_TOKEN" && out | grep -q "Dashboard wird neu gestartet" && out | grep -q "Dienst: $UNIT"'
+agentcmd "$D" 'y\n' install
+check "exit 0" '[ "$(rc)" -eq 0 ] || { out; false; }'
+check "token created: 32+ characters, not the status token" '[ "$(sed -n "s/^CRB_AGENT_TOKEN=//p" "$D/.env" | wc -c)" -gt 32 ] && [ "$(sed -n "s/^CRB_AGENT_TOKEN=//p" "$D/.env")" != "$(sed -n "s/^CRB_STATUS_TOKEN=//p" "$D/.env")" ]'
+check "service file: the line added, every other line as before" 'cmp -s "$DF" "$WORK/dash.new"'
+check "token reaches the dashboard and no box" '[ "$( (cd "$D" && docker compose config) | grep -c "CRB_AGENT_TOKEN")" -eq 1 ] && (cd "$D" && docker compose config crb-dashboard) | grep -q "CRB_AGENT_TOKEN: $(sed -n "s/^CRB_AGENT_TOKEN=//p" "$D/.env")"'
+check "dashboard recreated, unit written and started" 'dlog | grep -q "compose up -d crb-dashboard" && grep -q "^WorkingDirectory=$D$" "$UNIT" && grep -q "^ExecStart=$D/crb agent$" "$UNIT" && grep -q "^Restart=always$" "$UNIT" && grep -q "systemctl --user enable crb-agent.service" "$WORK/sys.log" && grep -q "systemctl --user restart crb-agent.service" "$WORK/sys.log"'
+check "lingering off: the command is printed, not run" 'out | grep -q "sudo loginctl enable-linger $(id -un)" && ! grep -q "enable-linger" "$WORK/sys.log"'
+agentcmd "$D" 'y\n' install
+check "second run: nothing to create, dashboard not recreated" '[ "$(rc)" -eq 0 ] && ! out | grep -q "wird erzeugt" && ! dlog | grep -q "compose up"'
+D2="$WORK/t-agent2"; cp -R "$WORK/t-dash" "$D2"; cp "$D2/.env" "$WORK/env2.before"
+agentcmd "$D2" 'y\n' install
+check "second installation: nothing changed, the other directory named" '[ "$(rc)" -ne 0 ] && out | grep -q "$D" && cmp -s "$D2/.env" "$WORK/env2.before" && grep -q "^WorkingDirectory=$D$" "$UNIT"'
+agentcmd "$D" '' uninstall
+check "uninstall: unit gone, stopped, token stays" '[ "$(rc)" -eq 0 ] && [ ! -e "$UNIT" ] && grep -q "systemctl --user disable --now crb-agent.service" "$WORK/sys.log" && grep -q "^CRB_AGENT_TOKEN=" "$D/.env" && cmp -s "$DF" "$WORK/dash.new"'
+agentcmd "$D" '' status
+check "status after uninstall: non-zero" '[ "$(rc)" -ne 0 ] && out | grep -q "Dienst:    nicht installiert"'
+sed -e "1s/.*/# My own dashboard service./" "$WORK/dash.noagent" >"$D2/services/crb-dashboard.yaml"; cp "$D2/services/crb-dashboard.yaml" "$WORK/dash.own2"
+agentcmd "$D2" 'y\n' install
+# shellcheck disable=SC2016
+check "hand-written service file: unchanged, line shown, token created" '[ "$(rc)" -eq 0 ] && cmp -s "$D2/services/crb-dashboard.yaml" "$WORK/dash.own2" && out | grep -qF "CRB_AGENT_TOKEN: \"\${CRB_AGENT_TOKEN:-}\"" && grep -q "^CRB_AGENT_TOKEN=" "$D2/.env"'
+rm -f "$UNIT"; D3="$WORK/t-agent3"; cp -R "$WORK/t-dash" "$D3"
+(cd "$D3" && printf 'y\n' | NO_USER_MANAGER=1 DOCKER_LOG="$WORK/docker.log" STUB_DIR="$WORK/answers" SYS_LOG="$WORK/sys.log" PATH="$SSTUB:$LSTUB:$PATH" "$SCRIPT" agent install) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
+check "no user service manager: token steps done, says that no service was installed" '[ "$(rc)" -eq 0 ] && grep -q "^CRB_AGENT_TOKEN=" "$D3/.env" && out | grep -q "Kein Dienst installiert" && out | grep -q "./crb agent$" && [ ! -e "$UNIT" ]'
+
+echo "Update: reconciles the agent variable"
+D="$WORK/t-dash"; DF="$D/services/crb-dashboard.yaml"; cp "$WORK/dash.noagent" "$DF"
+# agent variable n; d1: mode (default, keep)
+update "$D" 'n\n\n'
+check "declined: file unchanged" '[ "$(rc)" -eq 0 ] && cmp -s "$DF" "$WORK/dash.noagent" && out | grep -q "./crb agent install"'
+# agent variable yes (default); d1: mode; apply y; recreate n
+update "$D" '\n\ny\nn\n'
+check "exit 0" '[ "$(rc)" -eq 0 ] || { out; false; }'
+check "the line is added, every other line as before" 'cmp -s "$DF" "$WORK/dash.new"'
+check "config shows it, dashboard listed for recreate, agent install named, no token created" '(cd "$D" && docker compose config crb-dashboard) | grep -q "CRB_AGENT_TOKEN:" && out | grep -q "Später: docker compose up -d crb-dashboard" && out | grep -q "./crb agent install" && ! grep -q "^CRB_AGENT_TOKEN=" "$D/.env"'
+update "$D" '\n'
+check "already present: no question, file unchanged" '[ "$(rc)" -eq 0 ] && ! out | grep -q "CRB_AGENT_TOKEN" && cmp -s "$DF" "$WORK/dash.new"'
+sed -e "1s/.*/# My own dashboard service./" "$WORK/dash.noagent" >"$DF"; cp "$DF" "$WORK/dash.own3"
+update "$D" '\n'
+# shellcheck disable=SC2016
+check "not created by crb: byte-identical, line printed" '[ "$(rc)" -eq 0 ] && cmp -s "$DF" "$WORK/dash.own3" && out | grep -qF "CRB_AGENT_TOKEN: \"\${CRB_AGENT_TOKEN:-}\"" && ! out | grep -q "CRB_AGENT_TOKEN in "'
+cp "$WORK/dash.new" "$DF"
+
 echo "Git: refuses root"
 (cd "$BASE" && PATH="$FAKE/root-only:$PATH" "$SCRIPT" git </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
 check "root refused" '[ "$(rc)" -ne 0 ] && out | grep -q "nicht als root"'

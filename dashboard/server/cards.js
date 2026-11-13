@@ -66,6 +66,7 @@ function boxGit(json) {
   const first = (w) => (w.path === '/workspace' ? 0 : 1);
   return {
     fetched_at: Array.isArray(stored) ? null : stored.fetched_at ?? null,
+    default_branch: Array.isArray(stored) ? null : stored.default_branch ?? null,
     worktrees: worktrees.map((w, i) => [w, i]).sort((a, b) => first(a[0]) - first(b[0]) || a[1] - b[1]).map(([w]) => w),
   };
 }

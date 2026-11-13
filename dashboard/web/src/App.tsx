@@ -1,21 +1,24 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { LogOut, WifiOff } from 'lucide-react';
-import type { BoxesResponse } from '@shared/types';
+import { LogOut, TriangleAlert, WifiOff } from 'lucide-react';
+import type { BoxesResponse, GitState } from '@shared/types';
 import { BoxCard } from '@/components/BoxCard';
 import { DetailView } from '@/components/DetailView';
 import { Enroll, SetupHint, SignIn, WrongAddress } from '@/components/AuthScreens';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { fetchBoxes, subscribe } from '@/lib/api';
+import { fetchGit } from '@/lib/git';
 import { enrollSecret, fetchAuthState, signOut, UnauthorizedError, type AuthState } from '@/lib/auth';
 
 const REFRESH_MS = 30000;
 const TICK_MS = 5000;
 
-function boxFromHash(): string | null {
+/** `#<box>` opens a box, `#<box>/git` its Git sheet on top. A box name has no slash. */
+function fromHash(): { box: string | null; git: boolean } {
   const h = decodeURIComponent(location.hash.replace(/^#/, ''));
-  return h || null;
+  const i = h.indexOf('/');
+  return { box: (i < 0 ? h : h.slice(0, i)) || null, git: i >= 0 && h.slice(i + 1) === 'git' };
 }
 
 /** Runs a state change inside a view transition where the browser has it; `type` selects the CSS (open/close). */
@@ -64,7 +67,11 @@ function Dashboard({ onUnauthorized, onSignOut }: { onUnauthorized?: () => void;
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const [openBox, setOpenBox] = useState<string | null>(() => boxFromHash());
+  const [openBox, setOpenBox] = useState<string | null>(() => fromHash().box);
+  const [gitSheet, setGitSheet] = useState(() => fromHash().git);
+  const [git, setGit] = useState<GitState | null>(null);
+  const openRef = useRef(openBox);
+  openRef.current = openBox;
   // The one card that takes part in the current transition (keeps the others off the animation layers).
   const [animBox, setAnimBox] = useState<string | null>(null);
   const [ticks, setTicks] = useState<Record<string, number>>({});
@@ -75,6 +82,8 @@ function Dashboard({ onUnauthorized, onSignOut }: { onUnauthorized?: () => void;
       if (e instanceof UnauthorizedError && onUnauthorized) onUnauthorized();
       else setError(String(e.message || e));
     });
+    // A failing request leaves the last state: the boxes' request reports what is wrong.
+    fetchGit().then(setGit).catch(() => {});
   }, [onUnauthorized]);
 
   useEffect(() => {
@@ -89,7 +98,14 @@ function Dashboard({ onUnauthorized, onSignOut }: { onUnauthorized?: () => void;
     });
     const poll = setInterval(refresh, REFRESH_MS);
     const tick = setInterval(() => setNow(Date.now()), TICK_MS);
-    const onHash = () => { const next = boxFromHash(); setAnimBox((cur) => next ?? cur); transition(() => setOpenBox(next), next ? 'open' : 'close'); };
+    const onHash = () => {
+      const next = fromHash();
+      setGitSheet(next.git);
+      // Opening or closing the sheet keeps the box and must not replay its transition.
+      if (openRef.current === next.box) return;
+      setAnimBox((cur) => next.box ?? cur);
+      transition(() => setOpenBox(next.box), next.box ? 'open' : 'close');
+    };
     window.addEventListener('hashchange', onHash);
     return () => { stop(); clearInterval(poll); clearInterval(tick); window.removeEventListener('hashchange', onHash); };
   }, [refresh]);
@@ -103,6 +119,15 @@ function Dashboard({ onUnauthorized, onSignOut }: { onUnauthorized?: () => void;
     if (history.state && (history.state as { crbDetail?: boolean }).crbDetail) history.back(); // triggers hashchange
     else { history.replaceState(null, '', location.pathname + location.search); transition(() => setOpenBox(null), 'close'); }
   }, []);
+
+  const sheet = useCallback((show: boolean) => {
+    if (show) {
+      if (!openBox) return;
+      history.pushState({ crbDetail: true, crbSheet: true }, '', `#${encodeURIComponent(openBox)}/git`);
+      setGitSheet(true);
+    } else if (history.state && (history.state as { crbSheet?: boolean }).crbSheet) history.back(); // triggers hashchange
+    else { if (openBox) history.replaceState(history.state, '', `#${encodeURIComponent(openBox)}`); setGitSheet(false); }
+  }, [openBox]);
 
   const waiting = data?.boxes.filter((b) => b.up && b.sessions.some((s) => s.state === 'waiting')).length ?? 0;
   const sorted = data ? [...data.boxes].sort((a, b) => score(b) - score(a) || a.name.localeCompare(b.name)) : [];
@@ -126,6 +151,12 @@ function Dashboard({ onUnauthorized, onSignOut }: { onUnauthorized?: () => void;
         </header>
 
         {error && <p className="text-destructive text-sm">Server nicht erreichbar: {error}</p>}
+        {git?.enabled && git.agent.seen && !git.agent.present && (
+          <p className="agent-absent bg-muted text-warning-foreground flex items-start gap-2 rounded-lg p-3 text-sm" role="status">
+            <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+            <span>Der Host-Agent meldet sich nicht: kein Fetch, keine Git-Aktionen. Auf dem Host: <code className="font-mono whitespace-nowrap">./crb agent status</code></span>
+          </p>
+        )}
 
         {!data ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -143,7 +174,7 @@ function Dashboard({ onUnauthorized, onSignOut }: { onUnauthorized?: () => void;
         )}
       </main>
 
-      {detail && <DetailView box={detail} now={now} tick={ticks[detail.name] ?? 0} onClose={close} />}
+      {detail && <DetailView box={detail} now={now} tick={ticks[detail.name] ?? 0} git={git} gitSheet={gitSheet} onGitSheet={sheet} onClose={close} />}
       {openBox && data && !detail && (
         <div className="bg-background fixed inset-0 z-40 flex items-center justify-center p-6 text-sm" role="dialog">
           <p className="text-muted-foreground">Box „{openBox}“ ist unbekannt. <button className="underline" onClick={close}>Zurück</button></p>

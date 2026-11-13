@@ -67,12 +67,41 @@ export interface GitWorktree {
   upstream?: string | null;
   unpushed?: number | null;
   behind?: number | null;
+  /** Commits of origin's default branch this checkout lacks; absent when the box is older than the field. */
+  behind_default?: number | null;
 }
 
 /** Every checkout of a box and when its repository was last fetched. */
 export interface BoxGit {
   fetched_at: string | null;
+  /** Name of origin's default branch, e.g. "main"; null when unknown or the box is older than the field. */
+  default_branch?: string | null;
   worktrees: GitWorktree[];
+}
+
+export type GitActionKind = 'fetch' | 'sync' | 'push' | 'pull' | 'merge' | 'branch';
+export type GitActionState = 'queued' | 'running' | 'done' | 'refused' | 'failed' | 'expired';
+
+/** A Git action queued for the host agent, and what became of it. */
+export interface GitAction {
+  id: string;
+  box: string;
+  kind: GitActionKind;
+  branch: string | null;
+  name: string | null;
+  carry: boolean;
+  state: GitActionState;
+  queued: string;
+  started: string | null;
+  finished: string | null;
+  text: string | null;
+}
+
+/** `GET /api/git`: whether actions exist at all (they need the login), the host agent, recent actions. */
+export interface GitState {
+  enabled: boolean;
+  agent: { seen: boolean; present: boolean; at: string | null };
+  actions: GitAction[];
 }
 
 export type SessionActivity = 'ended' | 'waiting' | 'working' | 'idle';

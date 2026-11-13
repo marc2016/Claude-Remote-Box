@@ -37,9 +37,9 @@ await post([
   ev('janus-note-vs', 'tool', { session: 'sess-janus-1', tool: 'Bash', summary: 'npm test', call_id: 'c3' }),
   ev('janus-note-vs', 'summary', { session: 'sess-janus-1', model: 'claude-opus-5-5', tokens_in: 310, tokens_out: 18400, cache_read: 1260000, cache_write: 42000, context: 84000, turns: 12, tool_calls: 41, cost_usd: 1.2, lines_added: 212, lines_removed: 37, started: now(), last: now() }),
   ev('janus-note-vs', 'waiting', { session: 'sess-janus-1', tool: 'Bash', summary: 'npm test', source: 'hook' }),
-  ev('janus-note-vs', 'git', { fetched_at: minutesAgo(12), worktrees: [
+  ev('janus-note-vs', 'git', { fetched_at: minutesAgo(12), default_branch: 'main', worktrees: [
     { path: '/workspace', branch: 'main', ahead: 0, dirty: 0, added: 0, removed: 0, subject: 'Release 0.3.0', committed: now(), remote: 'ok', upstream: 'origin/main', unpushed: 0, behind: 3 },
-    { path: '/workspace/.claude/worktrees/calm-clock', branch: 'session/calm-clock', ahead: 2, dirty: 1, added: 212, removed: 37, subject: 'Wrap navigation on small screens', committed: now(), remote: 'ok', upstream: 'origin/session/calm-clock', unpushed: 2, behind: 0 },
+    { path: '/workspace/.claude/worktrees/calm-clock', branch: 'session/calm-clock', ahead: 2, dirty: 1, added: 212, removed: 37, subject: 'Wrap navigation on small screens', committed: now(), remote: 'ok', upstream: 'origin/session/calm-clock', unpushed: 2, behind: 0, behind_default: 12 },
     { path: '/workspace/.claude/worktrees/brave-otter', branch: 'session/brave-otter-with-a-rather-long-descriptive-branch-name', ahead: 1, dirty: 0, added: 4, removed: 0, subject: 'Try another layout', committed: now(), remote: 'none', upstream: null, unpushed: null, behind: null },
     { path: '/workspace/.claude/worktrees/old-fix', branch: 'fix/login', ahead: 0, dirty: 0, added: 0, removed: 0, subject: 'Fix login redirect', committed: now(), remote: 'gone', upstream: null, unpushed: null, behind: null },
   ] }),

@@ -4,6 +4,8 @@ compose.yml
 compose.override.yaml
 compose.override.yml
 .env
+.crb-agent.lock/
+.crb-agent.state
 
 # Config directories hold login tokens
 /*/config/

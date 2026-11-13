@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect } from 'react';
 import { X } from 'lucide-react';
-import type { BoxCard as BoxCardModel } from '@shared/types';
+import type { BoxCard as BoxCardModel, GitState } from '@shared/types';
 import { Button } from '@/components/ui/button';
 import { Clawd } from '@/components/Clawd';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -14,7 +14,9 @@ import { activeSession, BoxHeader, cssName, deriveStatus, SessionBlock, SessionL
  * The detail view of one box: the card's information on the left (on top on a
  * phone) and the conversation on the right (below). Rendered over the grid.
  */
-export function DetailView({ box, now, tick, onClose }: { box: BoxCardModel; now: number; tick: number; onClose: () => void }) {
+export function DetailView({ box, now, tick, git, gitSheet, onGitSheet, onClose }: {
+  box: BoxCardModel; now: number; tick: number; git: GitState | null; gitSheet: boolean; onGitSheet: (open: boolean) => void; onClose: () => void;
+}) {
   const active = activeSession(box);
   const status = deriveStatus(box, active, now);
 
@@ -43,13 +45,12 @@ export function DetailView({ box, now, tick, onClose }: { box: BoxCardModel; now
           <div className="flex flex-col gap-3 px-4">
             <div className="clawd-track hidden min-w-0 md:block"><Clawd pose={status.pose} /></div>
             <StatusBox status={status} />
-            <div className="hidden md:block"><SessionBlock s={active} now={now} /></div>
+            <div className="hidden md:block"><SessionBlock s={active} now={now} defaultBranch={box.git?.default_branch} /></div>
             <div className="text-muted-foreground flex items-center justify-between gap-2 text-xs md:hidden">
               <span className="min-w-0 truncate">{active ? `${active.turns} Züge · ${active.tool_calls} Tools` : '–'}</span>
               <SessionLink s={active} />
             </div>
-            <GitOverview git={box.git} now={now} compact className="md:hidden" />
-            <GitOverview git={box.git} now={now} className="hidden border-t pt-3 md:flex" />
+            <GitOverview box={box} git={git} now={now} sheet={gitSheet} onSheet={onGitSheet} />
             <div className="hidden md:block"><SessionLink s={active} /></div>
           </div>
         </section>

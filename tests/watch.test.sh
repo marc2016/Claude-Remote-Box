@@ -65,6 +65,9 @@ git -C "$G/other" push -q origin main; git -C "$G/other" push -q origin --delete
 git -C "$GW" fetch -q --prune origin
 GEV=$(node "$WATCH" --git "$GW")
 check "after a host fetch: behind and fetch time" '[ "$(gitf main behind)" = 3 ] && [ "$(gitf main unpushed)" = 0 ] && gitf main fetched_at | grep -q "^\"20"'
+check "distance to the default branch: stale branch 3, default_branch main" '[ "$(gitf feat behind_default)" = 3 ] && [ "$(gitf fresh behind_default)" = 3 ] && [ "$(node -e "console.log(JSON.parse(process.argv[1]).default_branch)" "$GEV")" = main ]'
+git -C "$GW/.wt/new" merge -q --no-edit origin/main >/dev/null 2>&1
+check "up to date with the default branch: 0" '[ "$(node "$WATCH" --git "$GW" | node -e "let s=\"\";process.stdin.on(\"data\",(d)=>s+=d).on(\"end\",()=>console.log(JSON.parse(s).worktrees.find((w)=>w.branch===\"fresh\").behind_default))")" = 0 ]'
 check "upstream deleted on origin: gone" '[ "$(gitf merged remote)" = "\"gone\"" ] && [ "$(gitf merged unpushed)" = null ]'
 git -C "$GW" branch -q --unset-upstream feat
 GEV=$(node "$WATCH" --git "$GW")
@@ -73,6 +76,8 @@ mv "$G/origin.git" "$G/origin.away"
 before=$(git -C "$GW" for-each-ref; git -C "$GW" status --porcelain)
 check "works without the remote, same numbers" '[ "$(node "$WATCH" --git "$GW")" = "$GEV" ]'
 check "read-only" '[ "$(git -C "$GW" for-each-ref; git -C "$GW" status --porcelain)" = "$before" ]'
+git init -q -b main "$G/lonely"; git -C "$G/lonely" commit -q --allow-empty -m init
+check "no origin: behind_default and default_branch are null" '[ "$(node "$WATCH" --git "$G/lonely" | node -e "let s=\"\";process.stdin.on(\"data\",(d)=>s+=d).on(\"end\",()=>console.log(((e)=>e.worktrees[0].behind_default+\"_\"+e.default_branch)(JSON.parse(s))))")" = "null_null" ]'
 check "plain directory: no git event" '[ -z "$(node "$WATCH" --git "$WORK/plain")" ]'
 unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 

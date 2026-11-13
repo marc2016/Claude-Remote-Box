@@ -109,5 +109,79 @@ export function gitSummary(worktrees) {
   return { unpushed, behind };
 }
 
+/**
+ * The warning for a checkout that lacks commits of origin's default branch:
+ * "12 hinter main", or null. Not for the default branch itself (its distance
+ * is the ordinary "behind"), and not for a box that does not report the field.
+ * @param {{ branch?: string | null, behind_default?: number | null } | null | undefined} w
+ * @param {string | null | undefined} defaultBranch
+ * @returns {string | null}
+ */
+export function gitStale(w, defaultBranch) {
+  if (!w || !defaultBranch || !w.branch || w.branch === defaultBranch) return null;
+  return w.behind_default ? `${w.behind_default} hinter ${defaultBranch}` : null;
+}
+
+/**
+ * Which actions the reported state of a checkout allows. The page offers
+ * them; the host agent looks again and decides.
+ * @param {{ branch?: string | null, ahead?: number, remote?: 'ok' | 'none' | 'gone', unpushed?: number | null, behind?: number | null } | null | undefined} w
+ * @param {string | null | undefined} defaultBranch
+ * @returns {{ push: boolean, pull: boolean, merge: boolean, diverged: boolean }}
+ */
+export function gitActions(w, defaultBranch) {
+  const none = { push: false, pull: false, merge: false, diverged: false };
+  if (!w || !w.branch || !w.remote) return none;
+  const ahead = w.ahead ?? 0;
+  const unpushed = w.remote === 'ok' ? w.unpushed ?? 0 : 0;
+  const behind = w.remote === 'ok' ? w.behind ?? 0 : 0;
+  return {
+    push: (unpushed > 0 && behind === 0) || (w.remote === 'none' && ahead > 0),
+    pull: behind > 0 && unpushed === 0,
+    // A diverged branch is resolved on the host first; the page offers nothing for it.
+    merge: Boolean(defaultBranch) && w.branch !== defaultBranch && ahead > 0 && !(unpushed > 0 && behind > 0),
+    diverged: unpushed > 0 && behind > 0,
+  };
+}
+
+/**
+ * True while the checkouts shown are older than the last finished action: the
+ * box reports on its own schedule, up to half a minute later. Every action
+ * starts with a fetch, so a report from after it carries a newer fetch time.
+ * Gives up after a minute, for an action that never got to fetch.
+ * @param {{ started?: string | null, finished?: string | null } | null | undefined} last
+ * @param {string | null | undefined} fetchedAt
+ * @param {number} now
+ */
+export function gitSettling(last, fetchedAt, now) {
+  if (!last || !last.started || !last.finished) return false;
+  if (now - Date.parse(last.finished) > 60000) return false;
+  return !fetchedAt || Date.parse(fetchedAt) < Date.parse(last.started);
+}
+
+/** A branch name the dashboard accepts; the same rule as the server's. */
+export const validBranchName = (v) => typeof v === 'string' && /^[A-Za-z0-9._/-]{1,100}$/.test(v) && !v.startsWith('-');
+
+/**
+ * Queues an action and, when the server asks for a recent passkey
+ * confirmation, runs it once and queues again.
+ * @param {() => Promise<{ status: number, error?: string }>} post sends the action
+ * @param {() => Promise<boolean>} confirm asks for the passkey; true when it was given
+ * @returns {Promise<'queued' | 'unconfirmed' | 'absent' | 'limited' | 'signed-out' | 'error'>}
+ */
+export async function queueWithConfirm(post, confirm) {
+  let r = await post();
+  if (r.status === 403 && r.error === 'confirm') {
+    if (!(await confirm())) return 'unconfirmed';
+    r = await post();
+    if (r.status === 403 && r.error === 'confirm') return 'unconfirmed';
+  }
+  if (r.status === 202) return 'queued';
+  if (r.status === 503) return 'absent';
+  if (r.status === 429) return 'limited';
+  if (r.status === 401) return 'signed-out';
+  return 'error';
+}
+
 /** Event types the UI shows in a session timeline. */
 export const TIMELINE_TYPES = ['prompt', 'reply', 'tool', 'tool_result', 'waiting', 'resumed'];

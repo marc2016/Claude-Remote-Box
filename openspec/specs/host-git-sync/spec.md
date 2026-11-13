@@ -1,7 +1,7 @@
 # host-git-sync Specification
 
 ## Purpose
-A host command that shows how every project's branches stand against `origin` and synchronizes them in both directions with one call, using the host user's Git credentials, so that no box and no dashboard ever needs to push or pull.
+The host's Git commands: they show how every project's branches stand against `origin`, synchronize them in both directions, merge a branch into the default branch, and create branches, all with the host user's Git credentials, so that no box and no dashboard container ever holds a credential. The dashboard triggers them through the host agent.
 
 ## Requirements
 

@@ -57,6 +57,7 @@ services:
   #   security_opt: [no-new-privileges:true]
   #   environment:
   #     CRB_STATUS_TOKEN: "${CRB_STATUS_TOKEN}"
+  #     CRB_AGENT_TOKEN: "${CRB_AGENT_TOKEN:-}"                          # host agent for Git actions; never give it to a box
   #     CRB_DASHBOARD_URL: "${CRB_DASHBOARD_URL:-}"                      # public https address; passkeys are bound to it
   #     CRB_DASHBOARD_PROXY: "${CRB_DASHBOARD_PROXY:-}"                  # address of the reverse proxy
   #     CRB_DASHBOARD_AUTH: "${CRB_DASHBOARD_AUTH:-}"                    # off: no login (private network only)

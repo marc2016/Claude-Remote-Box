@@ -452,7 +452,7 @@ function defaultBranch(ws) {
 // counterpart (the configured upstream on origin, else origin/<branch>).
 function worktreeState(dir, def) {
   const w = { path: dir, branch: null, ahead: 0, dirty: 0, added: 0, removed: 0, subject: null, committed: null,
-    remote: 'none', upstream: null, unpushed: null, behind: null };
+    remote: 'none', upstream: null, unpushed: null, behind: null, behind_default: null };
   const st = git(dir, ['status', '--porcelain=v2', '--branch']);
   if (st === null) return null;
   let upstream = null; let ab = null;
@@ -477,6 +477,11 @@ function worktreeState(dir, def) {
     const stat = git(dir, ['diff', '--shortstat', `${def}...HEAD`]) || '';
     const ins = stat.match(/(\d+) insertion/); const del = stat.match(/(\d+) deletion/);
     w.added = ins ? count(ins[1]) : 0; w.removed = del ? count(del[1]) : 0;
+    // Only against origin: a local default branch says nothing about what the session lacks.
+    if (def.startsWith('refs/remotes/origin/')) {
+      const missing = git(dir, ['rev-list', '--count', `HEAD..${def}`]);
+      if (missing !== null) w.behind_default = count(missing);
+    }
   }
   const last = git(dir, ['log', '-1', '--format=%s%x00%cI']);
   if (last) { const [subject, committed] = last.split('\0'); w.subject = truncate(subject, SUMMARY_LIMIT); w.committed = committed || null; }
@@ -502,7 +507,8 @@ function gitEvent(ws) {
   if (common) {
     try { fetchedAt = fs.statSync(path.join(path.resolve(ws, common), 'FETCH_HEAD')).mtime.toISOString(); } catch { /* never fetched */ }
   }
-  return { type: 'git', worktrees, fetched_at: fetchedAt };
+  const defaultBranch_ = def && def.startsWith('refs/remotes/origin/') ? def.slice('refs/remotes/origin/'.length) : null;
+  return { type: 'git', worktrees, fetched_at: fetchedAt, default_branch: defaultBranch_ };
 }
 
 // --- periodic checks -----------------------------------------------------------

@@ -192,6 +192,9 @@ export function createAuth(store, settings, { now = () => new Date(), log = cons
       }
       if (!info) { json(res, 401, { error: 'sign-in failed' }); return true; }
       store.usedPasskey(credential.id, info.newCounter, now());
+      // A browser that was signed in confirms with its passkey: one session, the new one.
+      const previous = cookieValue(req);
+      if (previous) store.endSession(previous);
       setCookie(res, store.createSession(credential.id, now()));
       json(res, 200, { ok: true });
       return true;

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { openDb } from './db.js';
 import { buildCards } from './cards.js';
 import { authSettings, createAuth } from './auth.js';
+import { createGit } from './git.js';
 import { TIMELINE_TYPES } from '../shared/model.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -14,6 +15,7 @@ const cfg = {
   port: parseInt(process.env.PORT || '8080', 10),
   host: process.env.HOST || '0.0.0.0',
   token: process.env.CRB_STATUS_TOKEN || '',
+  agentToken: process.env.CRB_AGENT_TOKEN || '',
   dataDir: process.env.DATA_DIR || '/data',
   webDir: process.env.WEB_DIR || path.join(here, '..', 'web', 'dist'),
 };
@@ -22,6 +24,7 @@ const MAX_BODY = 5 * 1024 * 1024;
 const SSE_DEBOUNCE_MS = 500;
 const PRUNE_EVERY_MS = 6 * 60 * 60 * 1000;
 const SESSION_CHECK_MS = 5000;
+const ACTION_SWEEP_MS = 1000;
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
@@ -50,6 +53,10 @@ export function createServer(store, options = {}) {
   }, options.sessionCheckMs ?? SESSION_CHECK_MS) : null;
   sessionCheck?.unref();
 
+  const git = createGit(store, auth, { agentToken: options.agentToken ?? cfg.agentToken, now: options.now, notify, holdMs: options.holdMs });
+  const actionSweep = setInterval(() => git.sweep(), options.sweepMs ?? ACTION_SWEEP_MS);
+  actionSweep.unref();
+
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
     const p = url.pathname;
@@ -62,6 +69,12 @@ export function createServer(store, options = {}) {
       if (p.startsWith('/api/auth/')) {
         return void auth.handle(req, res, p, json).then((done) => { if (!done) json(res, 404, { error: 'not found' }); }, (e) => {
           console.error('auth request failed', e);
+          if (!res.headersSent) json(res, 500, { error: 'internal' }); else res.end();
+        });
+      }
+      if (p === '/api/git' || p.startsWith('/api/git/') || p.startsWith('/api/agent/')) {
+        return void git.handle(req, res, p, json).then((done) => { if (!done) json(res, 404, { error: 'not found' }); }, (e) => {
+          console.error('git request failed', e);
           if (!res.headersSent) json(res, 500, { error: 'internal' }); else res.end();
         });
       }
@@ -133,9 +146,10 @@ export function createServer(store, options = {}) {
     fs.createReadStream(file).pipe(res);
   }
 
-  server.on('close', () => { if (sessionCheck) clearInterval(sessionCheck); });
+  server.on('close', () => { if (sessionCheck) clearInterval(sessionCheck); clearInterval(actionSweep); git.close(); });
   server.clients = clients;
   server.auth = auth;
+  server.git = git;
   return server;
 }
 
@@ -157,6 +171,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   if (!login.on) console.error('warning: CRB_DASHBOARD_AUTH=off, the page and its data are open to everyone who reaches this port');
   else if (login.invalidUrl) console.error(`warning: CRB_DASHBOARD_URL "${login.invalidUrl}" is not an https:// origin without a path; the dashboard stays locked`);
   else if (!login.url) console.error('note: CRB_DASHBOARD_URL is empty, the dashboard is locked; run ./crb dashboard login');
+  if (cfg.agentToken && cfg.agentToken === cfg.token) console.error('warning: CRB_AGENT_TOKEN equals CRB_STATUS_TOKEN; every box could then act as the host agent');
   if (login.proxy.bad.length) console.error(`warning: CRB_DASHBOARD_PROXY entries ignored: ${login.proxy.bad.join(', ')}`);
   server.on('error', (e) => {
     if (e && e.code === 'EADDRINUSE') console.error(`port ${cfg.port} is in use; pick another one with PORT=<n>`);
@@ -164,7 +179,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     process.exit(1);
   });
   server.listen(cfg.port, cfg.host, () => console.log(`dashboard on http://${cfg.host}:${cfg.port}`));
-  const stop = () => { for (const c of server.clients) c.end(); server.closeAllConnections(); server.close(); store.close(); process.exit(0); };
+  const stop = () => { server.git.close(); for (const c of server.clients) c.end(); server.closeAllConnections(); server.close(); store.close(); process.exit(0); };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
 }

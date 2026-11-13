@@ -125,6 +125,18 @@ test('sign in with a known passkey starts a session', async () => {
   assert.equal((await boxes(r.cookie)).status, 200);
 });
 
+test('signing in again while signed in leaves one valid session', async () => {
+  const key = authenticator({ origin: ORIGIN });
+  const first = (await enroll(key)).cookie;
+  const o = await post('login/options', {}, { cookie: first });
+  const again = await post('login/verify', { id: o.body.id, response: key.get(o.body.options) }, { cookie: first });
+  assert.equal(again.status, 200);
+  assert.notEqual(again.cookie, first);
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS c FROM auth_sessions').get().c, 1);
+  assert.equal((await boxes(first)).status, 401);
+  assert.equal((await boxes(again.cookie)).status, 200);
+});
+
 test('a sign-in that is started but not completed creates no session', async () => {
   await enroll(authenticator({ origin: ORIGIN }));
   store.endAllSessions(now());
