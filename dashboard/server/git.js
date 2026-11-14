@@ -1,4 +1,4 @@
-// Git actions: the page queues them, the host agent collects them and reports
+// Git actions: the page queues them, the agent collects them and reports
 // what became of them. The dashboard never runs Git and holds no credential.
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { ACTION_KINDS } from './db.js';
@@ -132,7 +132,12 @@ export function createGit(store, auth, { agentToken = '', now = () => new Date()
   }
 
   function close() {
-    for (const w of waiting) { clearTimeout(w.timer); w.res.end(); }
+    // "Nothing queued", not an empty 200 the agent would read as an action.
+    for (const w of waiting) {
+      clearTimeout(w.timer);
+      if (!w.res.headersSent) w.res.writeHead(204);
+      w.res.end();
+    }
     waiting.clear();
   }
 

@@ -154,7 +154,7 @@ function Dashboard({ onUnauthorized, onSignOut }: { onUnauthorized?: () => void;
         {git?.enabled && git.agent.seen && !git.agent.present && (
           <p className="agent-absent bg-muted text-warning-foreground flex items-start gap-2 rounded-lg p-3 text-sm" role="status">
             <TriangleAlert className="mt-0.5 size-4 shrink-0" />
-            <span>Der Host-Agent meldet sich nicht: kein Fetch, keine Git-Aktionen. Auf dem Host: <code className="font-mono whitespace-nowrap">./crb agent status</code></span>
+            <span>Der Git-Agent meldet sich nicht: kein Fetch, keine Git-Aktionen. Auf dem Host: <code className="font-mono whitespace-nowrap">./crb agent status</code></span>
           </p>
         )}
 

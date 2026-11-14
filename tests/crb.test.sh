@@ -966,13 +966,13 @@ job() { printf '%s\n' "$2" >"$CURL_DIR/next.$1"; if [ $# -gt 2 ]; then printf '%
 echo "Agent: preconditions"
 D="$WORK/t-a0"; sfx "$D"
 (cd "$D" && "$SCRIPT" agent </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
-check "no token: non-zero, names crb agent install" '[ "$(rc)" -ne 0 ] && out | grep -q "./crb agent install" && [ ! -e "$D/.crb-agent.lock" ]'
+check "no token: non-zero, names crb agent install" '[ "$(rc)" -ne 0 ] && out | grep -q "./crb agent install" && [ ! -e "$D/crb-agent/lock" ]'
 (cd "$D" && "$SCRIPT" agent nope </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
-check "unknown argument: usage, non-zero, nothing started" '[ "$(rc)" -eq 64 ] && out | grep -q "crb agent install|uninstall|status" && [ ! -e "$D/.crb-agent.lock" ]'
+check "unknown argument: usage, non-zero, nothing started" '[ "$(rc)" -eq 64 ] && out | grep -q "crb agent install|uninstall|status|key" && [ ! -e "$D/crb-agent/lock" ]'
 (cd "$D" && PATH="$FAKE/root-only:$PATH" "$SCRIPT" agent </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
 check "root refused" '[ "$(rc)" -ne 0 ] && out | grep -q "nicht als root"'
 (cd "$D" && "$SCRIPT" agent status </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
-check "status without an agent: non-zero, says so" '[ "$(rc)" -ne 0 ] && out | grep -q "Agent:     läuft nicht"'
+check "status without an agent: non-zero, says so" '[ "$(rc)" -ne 0 ] && out | grep -q "Container: nicht eingerichtet" && out | grep -q "Schlüssel: keiner"'
 
 echo "Agent: carries out actions in order and reports them"
 D="$WORK/t-a1"; sfx "$D"; sbranch calm-clock g.txt 2; sbranch other-b f.txt 1
@@ -993,9 +993,9 @@ check "one fetch round logged at start" '[ "$(grep -c " Fetch: 1 ok$" "$ALOG")" 
 (cd "$D" && "$SCRIPT" agent </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
 check "second agent: non-zero, says so, the first keeps running" '[ "$(rc)" -ne 0 ] && out | grep -q "läuft schon ein Agent" && kill -0 "$APID"'
 (cd "$D" && "$SCRIPT" agent status </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
-check "status with an agent: 0, fetch and dashboard shown" '[ "$(rc)" -eq 0 ] && out | grep -q "Agent:     läuft (PID $APID)" && out | grep -q "Fetch:     vor 0 min" && out | grep -q "Dashboard: erreichbar"'
+check "status with an agent: 0, fetch and dashboard shown" '[ "$(rc)" -eq 0 ] && out | grep -q "Vordergrund: läuft (PID $APID)" && out | grep -q "Fetch:     vor 0 min" && out | grep -q "Dashboard: erreichbar"'
 agent_stop
-check "stopped: says so, lock gone" 'grep -q "Agent beendet" "$ALOG" && [ ! -e "$D/.crb-agent.lock" ]'
+check "stopped: says so, lock gone" 'grep -q "Agent beendet" "$ALOG" && [ ! -e "$D/crb-agent/lock" ]'
 
 echo "Agent: refuses what it does not know, without running Git"
 D="$WORK/t-a2"; mkdir -p "$D/plain"; cp "$BASE/compose.yaml" "$BASE/box.yaml" "$D/"; service "$D" sx ../plain
@@ -1033,12 +1033,13 @@ D="$WORK/t-a4"; sfx "$D"
 echo 'CRB_AGENT_TOKEN=Agent0123456789Agent0123456789Agent01' >"$D/.env"
 CURL_DIR="$D/curl"; mkdir -p "$CURL_DIR"
 for i in 1 2 3 4 5 6 7 8 9 10; do job "$i" 000; done
-job 11 204; job 12 401; job 13 401; job 14 401; job 15 204
+job 11 204; job 12 401; job 13 401; job 14 401; job 15 200
 AFETCH=1 agent_start "$D"
 check "reaches the end of the script" 'agent_wait "[ \"\$(cat \"$CURL_DIR/count\")\" -ge 16 ]" 300'
 agent_wait '[ "$(grep -c " Fetch: 1 ok$" "$ALOG")" -ge 2 ]' 50
 agent_stop
 check "one line per change of state, not per attempt" '[ "$(grep -c "Dashboard nicht erreichbar" "$ALOG")" -eq 1 ] && [ "$(grep -c "Dashboard erreichbar" "$ALOG")" -eq 2 ] && [ "$(grep -c "lehnt das Token ab" "$ALOG")" -eq 1 ]'
+check "an empty answer with 200 is no action and no log line" '! grep -q "ohne gültige Kennung" "$ALOG" && [ ! -e "$CURL_DIR/report." ]'
 check "keeps fetching meanwhile" '[ "$(grep -c " Fetch: 1 ok$" "$ALOG")" -ge 2 ]'
 D="$WORK/t-a5"; sfx "$D"; git -C "$W" remote set-url origin "ssh://git@127.0.0.1:1/none.git"
 echo 'CRB_AGENT_TOKEN=Agent0123456789Agent0123456789Agent01' >"$D/.env"
@@ -1053,62 +1054,112 @@ mkdir -p "$WORK/abin"; cp "$SCRIPT" "$WORK/abin/crb"; chmod 755 "$WORK/abin/crb"
 agent_start "$D" "$WORK/abin/crb"
 agent_wait 'grep -q "Agent gestartet" "$ALOG"' 100
 sed 's/Agent gestartet:/Agent neu gestartet:/' "$SCRIPT" >"$WORK/abin/crb.new"; chmod 755 "$WORK/abin/crb.new"; mv "$WORK/abin/crb.new" "$WORK/abin/crb"
-check "continues as the new script, same process, lock held" 'agent_wait "grep -q \"Agent neu gestartet\" \"$ALOG\"" 100 && kill -0 "$APID" && [ "$(cat "$D/.crb-agent.lock/pid")" = "$APID" ]'
+check "continues as the new script, same process, lock held" 'agent_wait "grep -q \"Agent neu gestartet\" \"$ALOG\"" 100 && kill -0 "$APID" && [ "$(cat "$D/crb-agent/lock/pid")" = "$APID" ]'
 job "$(( $(cat "$CURL_DIR/count" 2>/dev/null || echo 0) + 2 ))" 200 'id1\tpush\tsx\tcalm-clock\t-\t0'
 check "and still carries out actions" 'agent_wait "[ -f \"$CURL_DIR/report.id1\" ]" 100 && [ "$(head -n 1 "$CURL_DIR/report.id1")" = done ]'
 agent_stop
 
+echo "Agent: lock across host names, dashboard address of the service"
+D="$WORK/t-a7"; sfx "$D"
+echo 'CRB_AGENT_TOKEN=Agent0123456789Agent0123456789Agent01' >"$D/.env"
+mkdir -p "$D/crb-agent/lock"; echo 99999 >"$D/crb-agent/lock/pid"; uname -n >"$D/crb-agent/lock/host"
+CRB_AGENT_DASHBOARD=http://crb-dashboard:8080 agent_start "$D"
+check "a stale lock of this host name is taken over" 'agent_wait "grep -q \"Agent gestartet\" \"$ALOG\"" 100 && [ "$(cat "$D/crb-agent/lock/pid")" = "$APID" ] && [ "$(cat "$D/crb-agent/lock/host")" = "$(uname -n)" ]'
+check "the service address is used" 'grep -q "Dashboard http://crb-dashboard:8080" "$ALOG"'
+agent_stop
+mkdir -p "$D/crb-agent/lock"; echo 1 >"$D/crb-agent/lock/pid"; echo other-host >"$D/crb-agent/lock/host"
+(cd "$D" && "$SCRIPT" agent </dev/null) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
+check "a lock of another host name is refused, both names given" '[ "$(rc)" -ne 0 ] && out | grep -q "gestartet auf other-host (hier: $(uname -n))" && [ "$(cat "$D/crb-agent/lock/host")" = other-host ]'
+rm -rf "$D/crb-agent/lock"
+
 echo "Agent: token and service installation"
 check "a new dashboard service passes the agent token, empty by default" 'grep -qF "CRB_AGENT_TOKEN: \"\${CRB_AGENT_TOKEN:-}\"" "$WORK/dash.new"'
-SSTUB="$WORK/sstub"; mkdir -p "$SSTUB"
-cat >"$SSTUB/systemctl" <<'STUB'
+# Docker stub for the agent's service: `compose run ssh-keygen` writes a fake
+# key, any other `compose run` is the access check (exit $RUN_RC); ps answers
+# from $STUB_DIR/ps; up and rm are recorded. `compose config` runs for real.
+ISTUB="$WORK/istub"; mkdir -p "$ISTUB"
+cat >"$ISTUB/docker" <<EOF
 #!/bin/sh
-echo "systemctl $*" >>"$SYS_LOG"
-case "$*" in
-  "--user show-environment") [ -z "${NO_USER_MANAGER-}" ] || exit 1 ;;
-  "--user is-active"*) echo active ;;
+echo "docker \$*" >> "\$DOCKER_LOG"
+case "\$1 \$2" in
+  "compose ps") cat "\$STUB_DIR/ps" 2>/dev/null; exit 0 ;;
+  "compose up"|"compose rm") exit 0 ;;
+  "compose run")
+    kg=""; for a in "\$@"; do f=\$a; [ "\$a" = ssh-keygen ] && kg=1; done
+    if [ -n "\$kg" ]; then echo PRIVATE >"\$f"; echo "ssh-ed25519 AAAATESTKEY crb-agent@test" >"\$f.pub"; exit 0; fi
+    echo "access check ran"; exit "\${RUN_RC:-0}" ;;
 esac
-exit 0
-STUB
-printf '#!/bin/sh\necho "loginctl $*" >>"$SYS_LOG"\necho "${LINGER:-no}"\n' >"$SSTUB/loginctl"
-chmod +x "$SSTUB/systemctl" "$SSTUB/loginctl"
-UNIT="$HOME/.config/systemd/user/crb-agent.service"
-# agentcmd DIR ANSWERS ARG: runs `crb agent ARG` with the service manager and docker stubbed.
+exec "$REAL_DOCKER" "\$@"
+EOF
+chmod +x "$ISTUB/docker"
+# agentcmd DIR ANSWERS ARG: runs `crb agent ARG` with docker stubbed.
 agentcmd() {
   local dir=$1 answers=$2
-  : >"$WORK/docker.log"; : >"$WORK/sys.log"
-  printf 'running\n' >"$WORK/answers/ps"
-  (cd "$dir" && printf '%b' "$answers" | DOCKER_LOG="$WORK/docker.log" STUB_DIR="$WORK/answers" SYS_LOG="$WORK/sys.log" PATH="$SSTUB:$LSTUB:$PATH" "$SCRIPT" agent "$3") >"$WORK/out" 2>&1
+  : >"$WORK/docker.log"
+  (cd "$dir" && printf '%b' "$answers" | DOCKER_LOG="$WORK/docker.log" STUB_DIR="$WORK/answers" PATH="$ISTUB:$PATH" "$SCRIPT" agent "$3") >"$WORK/out" 2>&1
   echo $? >"$WORK/rc"
 }
+homesum() { find "$HOME" -type f -exec cksum {} + | sort; }
 D="$WORK/t-agent"; cp -R "$WORK/t-dash" "$D"; DF="$D/services/crb-dashboard.yaml"; cp "$WORK/dash.new" "$DF"
-sed -i.bak "/CRB_AGENT_TOKEN:/d" "$DF"; rm -f "$DF.bak"; cp "$DF" "$WORK/dash.noagent"; cp "$D/.env" "$WORK/env.before"
+AF="$D/services/crb-agent.yaml"
+sed -i.bak "/CRB_AGENT_TOKEN:/d" "$DF"; rm -f "$DF.bak"; cp "$DF" "$WORK/dash.noagent"
+# A project outside the installation directory with an HTTPS origin.
+git clone -q "$REPO" "$WORK/out-ws"; git -C "$WORK/out-ws" remote set-url origin https://github.com/me/app.git
+service "$D" outer "$WORK/out-ws"
+before=$(snapshot "$D"); cp "$D/compose.yaml" "$WORK/compose.before"; hbefore=$(homesum)
 agentcmd "$D" '\n' install
-check "declined: .env, service file and services as before" '[ "$(rc)" -eq 0 ] && out | grep -q "Nichts geändert" && cmp -s "$D/.env" "$WORK/env.before" && cmp -s "$DF" "$WORK/dash.noagent" && [ ! -e "$UNIT" ] && ! grep -q "enable\|restart" "$WORK/sys.log"'
-check "plan lists token, service file, restart and unit" 'out | grep -q "CRB_AGENT_TOKEN wird erzeugt" && out | grep -q "services/crb-dashboard.yaml: CRB_AGENT_TOKEN" && out | grep -q "Dashboard wird neu gestartet" && out | grep -q "Dienst: $UNIT"'
-agentcmd "$D" 'y\n' install
+check "declined: nothing changed, nothing started" '[ "$(rc)" -eq 0 ] && out | grep -q "Nichts geändert" && [ "$(snapshot "$D")" = "$before" ] && [ ! -e "$D/crb-agent" ] && ! dlog | grep -q "compose up\|compose run"'
+check "plan: token, dashboard line, restart, service file, outside mount, key, start" 'out | grep -q "CRB_AGENT_TOKEN wird erzeugt" && out | grep -q "services/crb-dashboard.yaml: CRB_AGENT_TOKEN" && out | grep -q "Dashboard wird neu gestartet" && out | grep -q "services/crb-agent.yaml: neu" && out | grep -q "Projekt outer: $WORK/out-ws wird eingebunden" && out | grep -q "Merge-Commits als: Test User <test@example.com>" && out | grep -q "HTTPS-Remotes über SSH: github.com" && out | grep -q "crb-agent/.ssh/id_ed25519 wird erzeugt" && out | grep -q "nichts installiert"'
+# Einrichten? y; access check (default yes)
+agentcmd "$D" 'y\n\n' install
 check "exit 0" '[ "$(rc)" -eq 0 ] || { out; false; }'
 check "token created: 32+ characters, not the status token" '[ "$(sed -n "s/^CRB_AGENT_TOKEN=//p" "$D/.env" | wc -c)" -gt 32 ] && [ "$(sed -n "s/^CRB_AGENT_TOKEN=//p" "$D/.env")" != "$(sed -n "s/^CRB_STATUS_TOKEN=//p" "$D/.env")" ]'
-check "service file: the line added, every other line as before" 'cmp -s "$DF" "$WORK/dash.new"'
-check "token reaches the dashboard and no box" '[ "$( (cd "$D" && docker compose config) | grep -c "CRB_AGENT_TOKEN")" -eq 1 ] && (cd "$D" && docker compose config crb-dashboard) | grep -q "CRB_AGENT_TOKEN: $(sed -n "s/^CRB_AGENT_TOKEN=//p" "$D/.env")"'
-check "dashboard recreated, unit written and started" 'dlog | grep -q "compose up -d crb-dashboard" && grep -q "^WorkingDirectory=$D$" "$UNIT" && grep -q "^ExecStart=$D/crb agent$" "$UNIT" && grep -q "^Restart=always$" "$UNIT" && grep -q "systemctl --user enable crb-agent.service" "$WORK/sys.log" && grep -q "systemctl --user restart crb-agent.service" "$WORK/sys.log"'
-check "lingering off: the command is printed, not run" 'out | grep -q "sudo loginctl enable-linger $(id -un)" && ! grep -q "enable-linger" "$WORK/sys.log"'
-agentcmd "$D" 'y\n' install
-check "second run: nothing to create, dashboard not recreated" '[ "$(rc)" -eq 0 ] && ! out | grep -q "wird erzeugt" && ! dlog | grep -q "compose up"'
-D2="$WORK/t-agent2"; cp -R "$WORK/t-dash" "$D2"; cp "$D2/.env" "$WORK/env2.before"
-agentcmd "$D2" 'y\n' install
-check "second installation: nothing changed, the other directory named" '[ "$(rc)" -ne 0 ] && out | grep -q "$D" && cmp -s "$D2/.env" "$WORK/env2.before" && grep -q "^WorkingDirectory=$D$" "$UNIT"'
-agentcmd "$D" '' uninstall
-check "uninstall: unit gone, stopped, token stays" '[ "$(rc)" -eq 0 ] && [ ! -e "$UNIT" ] && grep -q "systemctl --user disable --now crb-agent.service" "$WORK/sys.log" && grep -q "^CRB_AGENT_TOKEN=" "$D/.env" && cmp -s "$DF" "$WORK/dash.new"'
+check "dashboard service: the line added, every other line as before" 'cmp -s "$DF" "$WORK/dash.new"'
+check "service file created by crb and included once" '[ "$(head -n 1 "$AF" | cut -c1-15)" = "# Created by cr" ] && [ "$(grep -c "^  - services/crb-agent.yaml$" "$D/compose.yaml")" -eq 1 ] && (cd "$D" && docker compose config --services) | grep -q "^crb-agent$"'
+ACFG=$(cd "$D" && docker compose config crb-agent)
+check "token reaches the dashboard only, not the agent or a box" '[ "$( (cd "$D" && docker compose config) | grep -c "CRB_AGENT_TOKEN")" -eq 1 ] && ! echo "$ACFG" | grep -q CRB_AGENT_TOKEN'
+check "hardened: user, no capabilities, read-only, no port, init, fixed host name" 'echo "$ACFG" | grep -q "user: .$(id -u):$(id -g)" && echo "$ACFG" | grep -q -- "- ALL" && echo "$ACFG" | grep -q "read_only: true" && ! echo "$ACFG" | grep -q "ports:" && echo "$ACFG" | grep -q "init: true" && echo "$ACFG" | grep -q "hostname: crb-agent" && ! echo "$ACFG" | grep -q docker.sock'
+check "mounts: the directory and the outside workspace at their own paths" 'echo "$ACFG" | grep -q "source: $D$" && echo "$ACFG" | grep -q "target: $D$" && echo "$ACFG" | grep -q "target: $WORK/out-ws$" && [ "$(echo "$ACFG" | grep -c "target: ")" -eq 2 ]'
+check "environment: home, dashboard, identity, ssh, HTTPS rewrite" 'echo "$ACFG" | grep -q "HOME: $D/crb-agent" && echo "$ACFG" | grep -q "CRB_AGENT_DASHBOARD: http://crb-dashboard:8080" && echo "$ACFG" | grep -q "GIT_COMMITTER_NAME: Test User" && echo "$ACFG" | grep -q "StrictHostKeyChecking=accept-new" && echo "$ACFG" | grep -q "GIT_CONFIG_KEY_0: url.git@github.com:.insteadOf" && echo "$ACFG" | grep -q "GIT_CONFIG_VALUE_0: https://github.com/"'
+check "key created in the container, only for the user, printed with the GitHub advice" 'dlog | grep -q "compose run --rm --no-deps -T crb-agent ssh-keygen" && [ -f "$D/crb-agent/.ssh/id_ed25519" ] && [ "$(ls -ld "$D/crb-agent/.ssh" | cut -c1-10)" = drwx------ ] && out | grep -q "ssh-ed25519 AAAATESTKEY" && out | grep -q "github.com/settings/ssh/new" && out | grep -q "Deploy-Key reicht nicht"'
+check "dashboard recreated, access checked, agent started, in that order" '[ "$(dlog | grep -o "compose up -d crb-dashboard\|crb-agent ./crb git --list\|compose up -d crb-agent" | tr "\n" "|")" = "compose up -d crb-dashboard|crb-agent ./crb git --list|compose up -d crb-agent|" ] && out | grep -q "erreicht origin aller Projekte"'
+check "nothing written outside the installation directory" '[ "$(homesum)" = "$hbefore" ]'
+cp "$D/crb-agent/.ssh/id_ed25519.pub" "$WORK/key.before"
+RUN_RC=1 agentcmd "$D" 'y\n\n' install
+check "second run: key kept, nothing to create, dashboard not recreated, failed check reported" '[ "$(rc)" -eq 0 ] && cmp -s "$D/crb-agent/.ssh/id_ed25519.pub" "$WORK/key.before" && ! out | grep -q "wird erzeugt" && out | grep -q "services/crb-agent.yaml: wird neu geschrieben" && ! dlog | grep -q "ssh-keygen\|up -d crb-dashboard" && out | grep -q "Nicht jedes Projekt ist erreichbar" && [ "$(grep -c "^  - services/crb-agent.yaml$" "$D/compose.yaml")" -eq 1 ]'
+agentcmd "$D" '' key
+check "key: printed" '[ "$(rc)" -eq 0 ] && out | grep -q "ssh-ed25519 AAAATESTKEY"'
+printf 'running\n' >"$WORK/answers/ps"
 agentcmd "$D" '' status
-check "status after uninstall: non-zero" '[ "$(rc)" -ne 0 ] && out | grep -q "Dienst:    nicht installiert"'
+check "status: container running, key shown, 0" '[ "$(rc)" -eq 0 ] && out | grep -q "Container: crb-agent, running" && out | grep -q "Schlüssel: crb-agent/.ssh/id_ed25519.pub"'
+printf 'exited\n' >"$WORK/answers/ps"
+agentcmd "$D" '' status
+check "status: container stopped, non-zero" '[ "$(rc)" -ne 0 ] && out | grep -q "Container: crb-agent, exited"'
+
+echo "Agent: not a project"
+gitcmd "$D" --list --no-fetch
+check "git overview: no row for the agent or the dashboard" '! out | grep -q "^crb-agent\|^crb-dashboard"'
+# update: d1 mode, d2 keeps; nothing else to do
+update "$D" '\n'
+check "update: no question names crb-agent" '[ "$(rc)" -eq 0 ] && ! out | grep -q "crb-agent"'
+
+agentcmd "$D" '' uninstall
+check "uninstall: removed, include line gone, token and key kept" '[ "$(rc)" -eq 0 ] && dlog | grep -q "compose rm -s -f crb-agent" && [ ! -e "$AF" ] && ! grep -q "crb-agent" "$D/compose.yaml" && grep -q "^CRB_AGENT_TOKEN=" "$D/.env" && cmp -s "$D/crb-agent/.ssh/id_ed25519.pub" "$WORK/key.before" && (cd "$D" && docker compose config -q)'
+agentcmd "$D" '' status
+check "status after uninstall: non-zero" '[ "$(rc)" -ne 0 ] && out | grep -q "Container: nicht eingerichtet"'
+printf '# My own agent.\nservices: {}\n' >"$AF"; cp "$AF" "$WORK/agent.own"; cp "$D/compose.yaml" "$WORK/compose.own"
+agentcmd "$D" 'y\n\n' install
+check "hand-written agent service file: refused, nothing changed" '[ "$(rc)" -ne 0 ] && out | grep -q "nicht von crb angelegt" && cmp -s "$AF" "$WORK/agent.own" && cmp -s "$D/compose.yaml" "$WORK/compose.own"'
+rm -f "$AF"
+
+D2="$WORK/t-agent2"; cp -R "$WORK/t-dash" "$D2"
 sed -e "1s/.*/# My own dashboard service./" "$WORK/dash.noagent" >"$D2/services/crb-dashboard.yaml"; cp "$D2/services/crb-dashboard.yaml" "$WORK/dash.own2"
-agentcmd "$D2" 'y\n' install
+agentcmd "$D2" 'y\nn\n' install
 # shellcheck disable=SC2016
-check "hand-written service file: unchanged, line shown, token created" '[ "$(rc)" -eq 0 ] && cmp -s "$D2/services/crb-dashboard.yaml" "$WORK/dash.own2" && out | grep -qF "CRB_AGENT_TOKEN: \"\${CRB_AGENT_TOKEN:-}\"" && grep -q "^CRB_AGENT_TOKEN=" "$D2/.env"'
-rm -f "$UNIT"; D3="$WORK/t-agent3"; cp -R "$WORK/t-dash" "$D3"
-(cd "$D3" && printf 'y\n' | NO_USER_MANAGER=1 DOCKER_LOG="$WORK/docker.log" STUB_DIR="$WORK/answers" SYS_LOG="$WORK/sys.log" PATH="$SSTUB:$LSTUB:$PATH" "$SCRIPT" agent install) >"$WORK/out" 2>&1; echo $? >"$WORK/rc"
-check "no user service manager: token steps done, says that no service was installed" '[ "$(rc)" -eq 0 ] && grep -q "^CRB_AGENT_TOKEN=" "$D3/.env" && out | grep -q "Kein Dienst installiert" && out | grep -q "./crb agent$" && [ ! -e "$UNIT" ]'
+check "hand-written dashboard service: unchanged, line shown, token created, check skipped" '[ "$(rc)" -eq 0 ] && cmp -s "$D2/services/crb-dashboard.yaml" "$WORK/dash.own2" && out | grep -qF "CRB_AGENT_TOKEN: \"\${CRB_AGENT_TOKEN:-}\"" && grep -q "^CRB_AGENT_TOKEN=" "$D2/.env" && ! dlog | grep -q "git --list"'
+D3="$WORK/t-agent3"; cp -R "$WORK/t-dash" "$D3"; cp "$D3/compose.yaml" "$WORK/compose3.before"; cp "$D3/.env" "$WORK/env3.before"
+CRB_VERSION='${x' agentcmd "$D3" 'y\n\n' install
+check "invalid Compose result: everything restored, nothing started" '[ "$(rc)" -ne 0 ] && out | grep -q "zurückgenommen" && cmp -s "$D3/compose.yaml" "$WORK/compose3.before" && cmp -s "$D3/.env" "$WORK/env3.before" && [ ! -e "$D3/services/crb-agent.yaml" ] && ! dlog | grep -q "compose up\|compose run"'
 
 echo "Update: reconciles the agent variable"
 D="$WORK/t-dash"; DF="$D/services/crb-dashboard.yaml"; cp "$WORK/dash.noagent" "$DF"

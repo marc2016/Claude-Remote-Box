@@ -215,6 +215,17 @@ test('a held request is answered as soon as an action is queued', async () => {
   assert.equal(got.text.split('\t')[0], q.body.id);
 });
 
+test('a held request ends with 204 when the dashboard shuts down', async () => {
+  const s = await start({ holdMs: 5000 });
+  const held = next({ to: `http://127.0.0.1:${s.address().port}` });
+  await new Promise((r) => setTimeout(r, 80));
+  s.git.close();
+  const got = await held;
+  stop(s);
+  assert.equal(got.status, 204);
+  assert.equal(got.text, '');
+});
+
 test('the boxes\' token, no token, a session cookie and an empty agent token are refused', async () => {
   await queue({ box: 'flashagenda', kind: 'fetch' });
   assert.equal((await next({ token: 'status-token' })).status, 401);

@@ -1,7 +1,7 @@
 # host-git-sync Specification
 
 ## Purpose
-The host's Git commands: they show how every project's branches stand against `origin`, synchronize them in both directions, merge a branch into the default branch, and create branches, all with the host user's Git credentials, so that no box and no dashboard container ever holds a credential. The dashboard triggers them through the host agent.
+The host's Git commands: they show how every project's branches stand against `origin`, synchronize them in both directions, merge a branch into the default branch, and create branches. Typed on the host they run with the host user's Git credentials; the dashboard triggers them through the agent, which runs them in its own container with its own key. No box and no dashboard container ever holds a credential.
 
 ## Requirements
 

@@ -129,7 +129,7 @@ function dismissedId(box: string): string | null {
 /**
  * The checkouts of a box with their actions, the box's own actions, the state
  * of queued actions and the result of the last one. The page only queues; the
- * host agent carries out and decides.
+ * agent carries out and decides.
  */
 export function GitPanel({ box, git, now, className }: { box: BoxCard; git: GitState | null; now: number; className?: string }) {
   const [pending, setPending] = useState<Pending | null>(null);
@@ -176,10 +176,10 @@ export function GitPanel({ box, git, now, className }: { box: BoxCard; git: GitS
       </div>
 
       {git?.enabled && !git.agent.seen && (
-        <p className="text-muted-foreground leading-5">Aktionen brauchen den Host-Agenten. Auf dem Host: <code className="bg-muted rounded px-1 py-0.5 font-mono whitespace-nowrap">./crb agent install</code></p>
+        <p className="text-muted-foreground leading-5">Aktionen brauchen den Git-Agenten. Auf dem Host: <code className="bg-muted rounded px-1 py-0.5 font-mono whitespace-nowrap">./crb agent install</code></p>
       )}
       {git?.enabled && git.agent.seen && !git.agent.present && (
-        <p className="text-warning-foreground flex items-start gap-1.5 leading-5"><TriangleAlert className="mt-0.5 size-4 shrink-0" /> Der Host-Agent meldet sich nicht. Aktionen sind erst wieder möglich, wenn er läuft.</p>
+        <p className="text-warning-foreground flex items-start gap-1.5 leading-5"><TriangleAlert className="mt-0.5 size-4 shrink-0" /> Der Git-Agent meldet sich nicht. Aktionen sind erst wieder möglich, wenn er läuft.</p>
       )}
 
       {last && last.id !== dismissed && last.state !== 'queued' && last.state !== 'running' && (

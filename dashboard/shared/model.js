@@ -124,7 +124,7 @@ export function gitStale(w, defaultBranch) {
 
 /**
  * Which actions the reported state of a checkout allows. The page offers
- * them; the host agent looks again and decides.
+ * them; the agent looks again and decides.
  * @param {{ branch?: string | null, ahead?: number, remote?: 'ok' | 'none' | 'gone', unpushed?: number | null, behind?: number | null } | null | undefined} w
  * @param {string | null | undefined} defaultBranch
  * @returns {{ push: boolean, pull: boolean, merge: boolean, diverged: boolean }}

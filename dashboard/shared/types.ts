@@ -82,7 +82,7 @@ export interface BoxGit {
 export type GitActionKind = 'fetch' | 'sync' | 'push' | 'pull' | 'merge' | 'branch';
 export type GitActionState = 'queued' | 'running' | 'done' | 'refused' | 'failed' | 'expired';
 
-/** A Git action queued for the host agent, and what became of it. */
+/** A Git action queued for the agent, and what became of it. */
 export interface GitAction {
   id: string;
   box: string;
@@ -97,7 +97,7 @@ export interface GitAction {
   text: string | null;
 }
 
-/** `GET /api/git`: whether actions exist at all (they need the login), the host agent, recent actions. */
+/** `GET /api/git`: whether actions exist at all (they need the login), the agent, recent actions. */
 export interface GitState {
   enabled: boolean;
   agent: { seen: boolean; present: boolean; at: string | null };

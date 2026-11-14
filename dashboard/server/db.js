@@ -1,6 +1,6 @@
 // SQLite storage: raw events (idempotent by box+seq), per-session and per-box
 // state updated on ingest, pruning, the login's passkeys, sessions, and
-// enrollment link, and the Git actions queued for the host agent.
+// enrollment link, and the Git actions queued for the agent.
 import { createHash, randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -321,7 +321,7 @@ export class Store {
     this.db.prepare('DELETE FROM auth_enroll').run();
   }
 
-  // --- Git actions for the host agent ------------------------------------------
+  // --- Git actions for the agent ------------------------------------------
 
   boxKnown(name) {
     return Boolean(this.db.prepare('SELECT 1 FROM boxes WHERE name = ?').get(name));
@@ -339,7 +339,7 @@ export class Store {
       WHERE (state = 'queued' AND queued < ?) OR (state = 'running' AND started < ?)`).all(queuedCut, runCut).map((r) => r.box);
     if (!hit.length) return hit;
     this.db.prepare("UPDATE git_actions SET state = 'expired', finished = ?, text = ? WHERE state = 'queued' AND queued < ?")
-      .run(t, 'Der Host-Agent hat die Aktion nicht abgeholt.', queuedCut);
+      .run(t, 'Der Git-Agent hat die Aktion nicht abgeholt.', queuedCut);
     this.db.prepare("UPDATE git_actions SET state = 'failed', finished = ?, text = ? WHERE state = 'running' AND started < ?")
       .run(t, 'Der Host hat nicht geantwortet.', runCut);
     return hit;

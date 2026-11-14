@@ -171,7 +171,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   if (!login.on) console.error('warning: CRB_DASHBOARD_AUTH=off, the page and its data are open to everyone who reaches this port');
   else if (login.invalidUrl) console.error(`warning: CRB_DASHBOARD_URL "${login.invalidUrl}" is not an https:// origin without a path; the dashboard stays locked`);
   else if (!login.url) console.error('note: CRB_DASHBOARD_URL is empty, the dashboard is locked; run ./crb dashboard login');
-  if (cfg.agentToken && cfg.agentToken === cfg.token) console.error('warning: CRB_AGENT_TOKEN equals CRB_STATUS_TOKEN; every box could then act as the host agent');
+  if (cfg.agentToken && cfg.agentToken === cfg.token) console.error('warning: CRB_AGENT_TOKEN equals CRB_STATUS_TOKEN; every box could then act as the agent');
   if (login.proxy.bad.length) console.error(`warning: CRB_DASHBOARD_PROXY entries ignored: ${login.proxy.bad.join(', ')}`);
   server.on('error', (e) => {
     if (e && e.code === 'EADDRINUSE') console.error(`port ${cfg.port} is in use; pick another one with PORT=<n>`);

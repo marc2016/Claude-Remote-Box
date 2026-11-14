@@ -14,9 +14,10 @@
 #                         branch and pushes the result
 #   ./crb git branch <project> <name> [--carry]  new branch, checked out in
 #                         the workspace; --carry takes main's own commits along
-#   ./crb agent           the host agent: fetches at an interval and carries
-#                         out the Git actions queued in the dashboard
-#   ./crb agent install   sets it up as a service of this user (uninstall, status)
+#   ./crb agent           the agent: fetches at an interval and carries out
+#                         the Git actions queued in the dashboard
+#   ./crb agent install   sets it up as the Compose service crb-agent with its
+#                         own SSH key (uninstall, status, key)
 # Run it in the directory that holds compose.yaml.
 # A new box.yaml uses the newest release (latest). Override the tag to pin a
 # release or test an unreleased build: CRB_VERSION=edge ./crb add
@@ -30,6 +31,7 @@ set -euo pipefail
 CRB_VERSION="${CRB_VERSION:-latest}"
 CRB_IMAGE="ghcr.io/marc2016/claude-remote-box:${CRB_VERSION}"
 CRB_DASHBOARD_IMAGE="ghcr.io/marc2016/claude-remote-box-dashboard:${CRB_VERSION}"
+CRB_AGENT_IMAGE="ghcr.io/marc2016/claude-remote-box-agent:${CRB_VERSION}"
 # Where `update` fetches the newest copy of this script. A local path works too.
 CRB_SOURCE="${CRB_SOURCE:-https://raw.githubusercontent.com/marc2016/Claude-Remote-Box/main/crb}"
 
@@ -67,8 +69,8 @@ usage() {
   echo "       ./crb git push|pull <projekt> <branch>   einen Branch pushen oder holen"
   echo "       ./crb git merge <projekt> <branch>       in den Standard-Branch mergen und pushen"
   echo "       ./crb git branch <projekt> <name> [--carry]  Branch anlegen und auschecken"
-  echo "       ./crb agent           Host-Agent: regelmäßig abrufen, Aktionen aus dem Dashboard ausführen"
-  echo "       ./crb agent install|uninstall|status   als Dienst einrichten, entfernen, Zustand zeigen"
+  echo "       ./crb agent           Agent im Vordergrund: regelmäßig abrufen, Aktionen aus dem Dashboard ausführen"
+  echo "       ./crb agent install|uninstall|status|key   als Container einrichten, entfernen, Zustand, SSH-Schlüssel"
 }
 
 # ask VAR "Question" [default]: empty input takes the default.
@@ -244,6 +246,10 @@ add_status_lines() {
 # --- Dashboard login ---------------------------------------------------------
 
 DASHBOARD_FILE=services/crb-dashboard.yaml
+AGENT_FILE=services/crb-agent.yaml
+
+# crb_service NAME: a service crb adds next to the projects, not a project.
+crb_service() { [ "$1" = crb-dashboard ] || [ "$1" = crb-agent ]; }
 DASHBOARD_LOGIN_KEYS="CRB_DASHBOARD_URL CRB_DASHBOARD_PROXY CRB_DASHBOARD_AUTH CRB_DASHBOARD_REMOTE_INGEST"
 
 # dashboard_env_missing: which login variables the dashboard service file lacks.
@@ -752,6 +758,11 @@ EOF
   echo "✨ $name ist angelegt. Weiter mit:"
   echo "   docker compose up -d $name"
   echo "   docker compose exec -it $name setup"
+  if [ -f "$AGENT_FILE" ] && [[ "$dir" != "$PWD/"* ]]; then
+    echo ""
+    echo "   Der Workspace liegt außerhalb dieses Ordners. Damit der Agent ihn sieht:"
+    echo "   ./crb agent install"
+  fi
 }
 
 # =============================================================================
@@ -866,7 +877,7 @@ cmd_update() {
   local plan_agent=0
   if [ "$layout" = services ] && [ -f "$DASHBOARD_FILE" ] && agent_env_missing; then
     echo "   Das Dashboard kann jetzt Git-Aktionen auslösen. $DASHBOARD_FILE fehlt: CRB_AGENT_TOKEN"
-    echo "   Die Aktionen brauchen den Host-Agenten: ./crb agent install"
+    echo "   Die Aktionen brauchen den Agenten: ./crb agent install"
     if ! dashboard_by_crb; then
       echo "   Die Datei ist nicht von crb angelegt und bleibt unverändert. Unter environment: eintragen:"
       dashboard_env_line CRB_AGENT_TOKEN | sed 's/^/   /'
@@ -882,7 +893,7 @@ cmd_update() {
     for f in services/*.yaml; do
       [ -f "$f" ] || continue
       n=$(basename "$f" .yaml)
-      [ "$n" = crb-dashboard ] && continue
+      crb_service "$n" && continue
       if ! grep -qF -- "../$n/config:/home/node/.claude" "$f"; then
         echo "   $n: nicht von crb angelegt, wird übersprungen."
         continue
@@ -1215,7 +1226,7 @@ git_scan() {
   GS_STATUS=ok; GS_MSG=""; GS_WS=""; GS_ROWS=()
   case "$src" in
     /*) ws=$src ;;
-    \~/*) ws="$HOME/${src#\~/}" ;;
+    \~/*) ws="${CRB_HOST_HOME:-$HOME}/${src#\~/}" ;;
     */*|.*) ws="services/$src" ;;
     *) GS_STATUS=volume; return 0 ;;
   esac
@@ -1979,7 +1990,7 @@ cmd_git() {
   for f in services/*.yaml; do
     [ -f "$f" ] || continue
     n=$(basename "$f" .yaml)
-    [ "$n" = crb-dashboard ] && continue
+    crb_service "$n" && continue
     src=$(service_workspace "$f")
     [ -n "$src" ] || continue
     names+=("$n"); srcs+=("$src")
@@ -2049,13 +2060,15 @@ cmd_git() {
 # =============================================================================
 # agent
 # =============================================================================
-# The host agent: fetches every project at an interval and carries out the Git
-# actions queued in the dashboard, with the host user's credentials. It asks
-# the dashboard for work; nothing ever connects to it.
+# The agent: fetches every project at an interval and carries out the Git
+# actions queued in the dashboard. It asks the dashboard for work; nothing ever
+# connects to it. `crb agent install` runs it as the Compose service crb-agent
+# (image claude-remote-box-agent), which mounts this directory at its own path
+# and runs this script; ./crb-agent holds its home, SSH key, lock and state.
 
-AGENT_LOCK=.crb-agent.lock
-AGENT_STATE=.crb-agent.state
-AGENT_UNIT=crb-agent.service
+AGENT_DIR=crb-agent
+AGENT_LOCK=$AGENT_DIR/lock
+AGENT_STATE=$AGENT_DIR/state
 
 # agent_env_missing: the dashboard service file does not pass CRB_AGENT_TOKEN.
 agent_env_missing() { ! grep -qE '^[[:space:]]+CRB_AGENT_TOKEN:' "$DASHBOARD_FILE"; }
@@ -2090,8 +2103,10 @@ agent_check() {
   fi
 }
 
-# agent_base: where the dashboard is published on this machine.
+# agent_base: the dashboard over the Compose network (set by the agent's
+# service), else where it is published on this machine.
 agent_base() {
+  if [ -n "${CRB_AGENT_DASHBOARD-}" ]; then echo "$CRB_AGENT_DASHBOARD"; return 0; fi
   local bind
   bind=$(env_get CRB_DASHBOARD_BIND)
   bind=${bind:-127.0.0.1:8080}
@@ -2103,12 +2118,16 @@ agent_base() {
   echo "http://$bind"
 }
 
-# agent_pid: the PID of the agent that holds the lock, when it is alive.
+# agent_pid: the PID of the agent that holds the lock, when it was taken on
+# this host name and the process is alive. The agent's container has the fixed
+# host name crb-agent, so a recreated one recognizes its predecessor's lock.
 agent_pid() {
-  local pid=""
+  local pid="" host=""
   [ -f "$AGENT_LOCK/pid" ] || return 1
   pid=$(cat "$AGENT_LOCK/pid" 2>/dev/null || true)
+  host=$(cat "$AGENT_LOCK/host" 2>/dev/null || true)
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  if [ -n "$host" ] && [ "$host" != "$(uname -n)" ]; then return 1; fi
   kill -0 "$pid" 2>/dev/null || return 1
   echo "$pid"
 }
@@ -2138,7 +2157,7 @@ agent_pause() {
 # agent_is_project NAME: a project of this installation, as `crb git` sees them.
 agent_is_project() {
   [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
-  [ "$1" != crb-dashboard ] && [ -f "services/$1.yaml" ] && [ -n "$(service_workspace "services/$1.yaml")" ]
+  ! crb_service "$1" && [ -f "services/$1.yaml" ] && [ -n "$(service_workspace "services/$1.yaml")" ]
 }
 
 # agent_fetch_round: fetches every project; changes nothing else.
@@ -2153,6 +2172,13 @@ agent_fetch_round() {
     case "$GS_STATUS" in
       ok) ok=$((ok + 1)) ;;
       fetch-failed) failed=$((failed + 1)); agent_log "Fetch $n fehlgeschlagen: $(printf '%s\n' "$GS_MSG" | head -n 1)" ;;
+      missing)
+        failed=$((failed + 1))
+        if [ -n "${CRB_AGENT_DASHBOARD-}" ]; then
+          agent_log "Fetch $n: $GS_MSG ist im Container nicht eingebunden. Auf dem Host: ./crb agent install"
+        else
+          agent_log "Fetch $n: $GS_MSG gibt es nicht"
+        fi ;;
     esac
   done
   AG_FETCHED=$(date +%s)
@@ -2211,14 +2237,22 @@ agent_run() {
   token=$(env_get CRB_AGENT_TOKEN)
   [ -n "$token" ] || die "In .env fehlt CRB_AGENT_TOKEN. Einrichten mit: ./crb agent install"
 
-  # One agent per installation. A re-exec after an update keeps the PID and
-  # with it the lock; a lock whose process is gone is taken over.
-  local holder=""
+  # One agent per installation, in its container or in the foreground. A
+  # re-exec after an update keeps the PID and with it the lock; a lock whose
+  # process is gone is taken over. A lock taken under another host name cannot
+  # be checked from here.
+  local holder="" lhost=""
+  mkdir -p "$AGENT_DIR" || die "$AGENT_DIR lässt sich nicht anlegen."
   if ! mkdir "$AGENT_LOCK" 2>/dev/null; then
+    lhost=$(cat "$AGENT_LOCK/host" 2>/dev/null || true)
+    if [ -n "$lhost" ] && [ "$lhost" != "$(uname -n)" ]; then
+      die "Hier läuft schon ein Agent, gestartet auf $lhost (hier: $(uname -n)). Läuft er nicht mehr: rm -r $AGENT_LOCK"
+    fi
     holder=$(agent_pid || true)
     if [ -n "$holder" ] && [ "$holder" != "$$" ]; then die "Hier läuft schon ein Agent (PID $holder)."; fi
   fi
   echo "$$" > "$AGENT_LOCK/pid"
+  uname -n > "$AGENT_LOCK/host"
 
   AG_TMP=$(mktemp -d)
   chmod 700 "$AG_TMP"
@@ -2273,7 +2307,8 @@ agent_run() {
       200)
         agent_link ok "Dashboard erreichbar"; wait_s=5
         line=$(head -n 1 "$AG_TMP/next")
-        agent_act "$line" ;;
+        # An empty answer (a dashboard shutting down) is no action.
+        if [ -n "$line" ]; then agent_act "$line"; fi ;;
       204) agent_link ok "Dashboard erreichbar"; wait_s=5 ;;
       401|403)
         agent_link denied "Das Dashboard lehnt das Token ab (HTTP $code). Stimmt CRB_AGENT_TOKEN in .env mit dem des Dashboards überein? Sonst: docker compose up -d crb-dashboard"
@@ -2287,37 +2322,157 @@ agent_run() {
   agent_log "Agent beendet"
 }
 
-# agent_systemd: this user has a service manager.
-agent_systemd() { command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; }
+# agent_by_crb: the agent's service file was written by crb.
+agent_by_crb() { head -n 1 "$AGENT_FILE" | grep -q '^# Created by crb\.'; }
 
-agent_unit_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$AGENT_UNIT"; }
+# agent_workspaces: "name<TAB>workspace" per project whose workspace exists,
+# resolved as `crb git` does.
+agent_workspaces() {
+  local f n src ws
+  for f in services/*.yaml; do
+    [ -f "$f" ] || continue
+    n=$(basename "$f" .yaml)
+    agent_is_project "$n" || continue
+    src=$(service_workspace "$f"); src=${src//\$\$/\$}
+    case "$src" in
+      /*) ws=$src ;;
+      \~/*) ws="$HOME/${src#\~/}" ;;
+      */*|.*) ws="services/$src" ;;
+      *) continue ;;
+    esac
+    ws=$(cd "$ws" 2>/dev/null && pwd) || continue
+    printf '%s\t%s\n' "$n" "$ws"
+  done
+}
+
+# agent_https_hosts: the hosts of origins given as https://host/..., once each.
+# The agent reaches them over SSH with its key (url.<ssh>.insteadOf).
+agent_https_hosts() {
+  local n ws url host seen=" "
+  while IFS=$'\t' read -r n ws; do
+    url=$(git -C "$ws" remote get-url origin 2>/dev/null) || continue
+    case "$url" in https://*) ;; *) continue ;; esac
+    host=${url#https://}; host=${host%%/*}
+    [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || continue
+    case "$seen" in *" $host "*) continue ;; esac
+    seen="$seen$host "
+    echo "$host"
+  done < <(agent_workspaces)
+}
+
+# agent_write_service DIR NAME EMAIL: the agent's service file. Every path is
+# absolute and the same inside the container, so the paths crb git derives
+# (workspaces, worktrees) are valid on both sides.
+agent_write_service() {
+  local dir=$1 name=$2 email=$3 n ws h i=0
+  local -a hosts=()
+  while IFS= read -r h; do [ -n "$h" ] && hosts+=("$h"); done < <(agent_https_hosts)
+  {
+    echo "# Created by crb. The Git agent: fetches every project and carries out the"
+    echo "# Git actions queued in the dashboard, with its own SSH key in ./$AGENT_DIR."
+    echo "# Rewritten by ./crb agent install. Paths are absolute on purpose: the"
+    echo "# container sees every path as the host does."
+    echo "services:"
+    echo "  crb-agent:"
+    echo "    image: ${CRB_AGENT_IMAGE}"
+    echo "    restart: unless-stopped"
+    # shellcheck disable=SC2016
+    echo '    user: "${UID:-1000}:${GID:-1000}"'
+    echo "    init: true"
+    echo "    hostname: crb-agent"
+    echo "    read_only: true"
+    echo "    tmpfs: [/tmp]"
+    echo "    cap_drop: [ALL]"
+    echo "    security_opt: [no-new-privileges:true]"
+    echo "    stop_grace_period: 120s   # a running push or merge finishes"
+    echo "    # No port and no Docker socket: it asks the dashboard for work."
+    echo "    environment:"
+    echo "      CRB_DIR: $(yaml_str "$dir")"
+    echo "      HOME: $(yaml_str "$dir/$AGENT_DIR")"
+    echo "      CRB_HOST_HOME: $(yaml_str "$HOME")"
+    echo "      CRB_AGENT_DASHBOARD: \"http://crb-dashboard:8080\""
+    echo "      GIT_SSH_COMMAND: \"ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new\""
+    echo "      GIT_AUTHOR_NAME: $(yaml_str "$name")"
+    echo "      GIT_AUTHOR_EMAIL: $(yaml_str "$email")"
+    echo "      GIT_COMMITTER_NAME: $(yaml_str "$name")"
+    echo "      GIT_COMMITTER_EMAIL: $(yaml_str "$email")"
+    if [ ${#hosts[@]} -gt 0 ]; then
+      echo "      GIT_CONFIG_COUNT: \"${#hosts[@]}\""
+      for h in "${hosts[@]}"; do
+        echo "      GIT_CONFIG_KEY_$i: $(yaml_str "url.git@$h:.insteadOf")"
+        echo "      GIT_CONFIG_VALUE_$i: $(yaml_str "https://$h/")"
+        i=$((i + 1))
+      done
+    fi
+    echo "    volumes:"
+    echo "      - $(yaml_str "$dir:$dir")"
+    while IFS=$'\t' read -r n ws; do
+      [[ "$ws" == "$dir/"* ]] && continue
+      echo "      - $(yaml_str "$ws:$ws")   # $n"
+    done < <(agent_workspaces)
+  } > "$AGENT_FILE"
+}
+
+agent_print_key() {
+  echo "Öffentlicher Schlüssel des Agenten ($AGENT_DIR/.ssh/id_ed25519.pub):"
+  echo ""
+  cat "$AGENT_DIR/.ssh/id_ed25519.pub"
+  echo ""
+  echo "Bei GitHub eintragen: Settings > SSH and GPG keys > New SSH key"
+  echo "(https://github.com/settings/ssh/new). Er gilt dann für alle Repositories"
+  echo "des Kontos. Enger: ein eigener GitHub-Benutzer, der nur diese Projekte sieht."
+  echo "Ein Deploy-Key reicht nicht: GitHub nimmt ihn nur für ein einziges Repository."
+  echo "Widerrufen: den Schlüssel dort löschen."
+}
 
 agent_install() {
-  agent_check
-  [ -f "$DASHBOARD_FILE" ] || die "Das Dashboard ist noch nicht angelegt. Zuerst: ./crb dashboard"
-  banner "Host-Agent einrichten"
-  local dir="" unit="" other="" need_token=0 need_env=0 by_crb=0 systemd=0
-  dir=$(pwd)
-  unit=$(agent_unit_file)
-  if agent_systemd; then systemd=1; fi
-  if [ "$systemd" -eq 1 ] && [ -f "$unit" ]; then
-    other=$(sed -n 's/^WorkingDirectory=//p' "$unit" | head -n 1)
-    if [ -n "$other" ] && [ "$other" != "$dir" ]; then
-      die "Der Dienst $AGENT_UNIT gehört schon zur Installation $other. Nichts geändert. Dort entfernen mit: ./crb agent uninstall"
-    fi
+  check_host
+  [ -f compose.yaml ] || die "Hier liegt keine compose.yaml. Bitte im Ordner der Installation ausführen."
+  if [ ! -f box.yaml ] || [ ! -d services ]; then
+    die "crb agent braucht das services/-Layout (box.yaml und services/<name>.yaml). Diese Installation führt ihre Services in compose.yaml."
   fi
+  [ -f "$DASHBOARD_FILE" ] || die "Das Dashboard ist noch nicht angelegt. Zuerst: ./crb dashboard"
+  if [ -f "$AGENT_FILE" ] && ! agent_by_crb; then
+    die "$AGENT_FILE ist nicht von crb angelegt und bleibt, wie es ist. Nichts geändert."
+  fi
+  if [ ! -f "$AGENT_FILE" ] && ! grep -qE '^include:[[:space:]]*$' compose.yaml; then
+    die "compose.yaml: 'include:' muss allein in seiner Zeile stehen, mit den Einträgen als Liste darunter."
+  fi
+  banner "Agent einrichten"
+  local dir="" need_token=0 need_env=0 by_crb=0 fresh=1 key="$AGENT_DIR/.ssh/id_ed25519" name="" email="" https_hosts="" n ws rc=0
+  dir=$(pwd)
+  if [ -f "$AGENT_FILE" ]; then fresh=0; fi
   if [ -z "$(env_get CRB_AGENT_TOKEN)" ]; then need_token=1; fi
   if agent_env_missing; then need_env=1; fi
   if dashboard_by_crb; then by_crb=1; fi
+  [ -n "$(agent_workspaces)" ] || die "Keine Projekte mit Workspace in services/ gefunden."
+  https_hosts=$(agent_https_hosts | tr '\n' ' ')
+  name=$(git config --global user.name 2>/dev/null || true)
+  email=$(git config --global user.email 2>/dev/null || true)
+  if [ -z "$name" ]; then ask name "Git-Name für Merge-Commits des Agenten" "crb agent"; fi
+  if [ -z "$email" ]; then ask email "Git-E-Mail für Merge-Commits des Agenten" "crb-agent@$(uname -n)"; fi
 
-  echo "Der Agent holt regelmäßig den Stand von origin und führt die Git-Aktionen"
-  echo "aus, die du im Dashboard antippst: mit deinen Git-Zugangsdaten, ohne Rückfrage."
+  echo "Der Agent läuft als Container crb-agent neben dem Dashboard. Er holt"
+  echo "regelmäßig den Stand von origin und führt die Git-Aktionen aus, die du im"
+  echo "Dashboard antippst: mit seinem eigenen SSH-Schlüssel, ohne Rückfrage."
+  echo "Auf dem Host wird nichts installiert."
   echo ""
   echo "Geplant:"
   if [ "$need_token" -eq 1 ]; then echo "  .env: CRB_AGENT_TOKEN wird erzeugt"; fi
   if [ "$need_env" -eq 1 ] && [ "$by_crb" -eq 1 ]; then echo "  $DASHBOARD_FILE: CRB_AGENT_TOKEN"; fi
   if [ "$need_token" -eq 1 ] || [ "$need_env" -eq 1 ]; then echo "  Dashboard wird neu gestartet"; fi
-  if [ "$systemd" -eq 1 ]; then echo "  Dienst: $unit"; else echo "  Kein Dienst: hier gibt es keinen systemd für Benutzer"; fi
+  if [ "$fresh" -eq 1 ]; then
+    echo "  $AGENT_FILE: neu, in compose.yaml unter include:"
+  else
+    echo "  $AGENT_FILE: wird neu geschrieben"
+  fi
+  while IFS=$'\t' read -r n ws; do
+    if [[ "$ws" == "$dir/"* ]]; then echo "  Projekt $n"; else echo "  Projekt $n: $ws wird eingebunden"; fi
+  done < <(agent_workspaces)
+  echo "  Merge-Commits als: $name <$email>"
+  if [ -n "$https_hosts" ]; then echo "  HTTPS-Remotes über SSH: $https_hosts"; fi
+  if [ -f "$key" ]; then echo "  SSH-Schlüssel: $key (bleibt)"; else echo "  SSH-Schlüssel: $key wird erzeugt"; fi
+  echo "  Container crb-agent wird gestartet"
   if [ "$need_env" -eq 1 ] && [ "$by_crb" -eq 0 ]; then
     echo ""
     echo "$DASHBOARD_FILE ist nicht von crb angelegt und bleibt unverändert."
@@ -2327,74 +2482,110 @@ agent_install() {
   echo ""
   if ! confirm "Einrichten?"; then echo "Nichts geändert."; return 0; fi
 
+  # --- Changes (restorable until the Compose check passes) ------------------
+  local backup
+  backup=$(mktemp -d)
+  cp -p compose.yaml "$backup/compose.yaml"
+  cp -p "$DASHBOARD_FILE" "$backup/dashboard.yaml"
+  if [ -f .env ]; then cp -p .env "$backup/.env"; fi
+  if [ -f "$AGENT_FILE" ]; then cp -p "$AGENT_FILE" "$backup/agent.yaml"; fi
+
   ensure_agent_token
   if [ "$need_env" -eq 1 ] && [ "$by_crb" -eq 1 ]; then add_agent_env; fi
+  agent_write_service "$dir" "$name" "$email"
+  if [ "$fresh" -eq 1 ]; then
+    local tmp
+    tmp=$(mktemp)
+    awk -v line="  - $AGENT_FILE" '{ print } !done && /^include:[[:space:]]*$/ { print line; done = 1 }' compose.yaml > "$tmp"
+    cat "$tmp" > compose.yaml
+    rm -f "$tmp"
+  fi
+  local check
+  if ! check=$(docker compose config -q 2>&1); then
+    echo "$check" >&2
+    cp -p "$backup/compose.yaml" compose.yaml
+    cp -p "$backup/dashboard.yaml" "$DASHBOARD_FILE"
+    if [ -f "$backup/.env" ]; then cp -p "$backup/.env" .env; else rm -f .env; fi
+    if [ -f "$backup/agent.yaml" ]; then cp -p "$backup/agent.yaml" "$AGENT_FILE"; else rm -f "$AGENT_FILE"; fi
+    rm -rf "$backup"
+    die "Die Compose-Konfiguration ist ungültig. Alle Änderungen wurden zurückgenommen."
+  fi
+  rm -rf "$backup"
+
+  # Created here, so it belongs to the user and not to root (Docker).
+  mkdir -p "$AGENT_DIR/.ssh"
+  chmod 700 "$AGENT_DIR" "$AGENT_DIR/.ssh"
+
   if [ "$need_token" -eq 1 ] || [ "$need_env" -eq 1 ]; then
-    check_host
     docker compose up -d crb-dashboard </dev/null || warn "Das Dashboard ließ sich nicht neu starten. Von Hand: docker compose up -d crb-dashboard"
   fi
 
-  if [ "$systemd" -eq 0 ]; then
+  if [ ! -f "$key" ]; then
     echo ""
-    echo "Kein Dienst installiert. Der Agent läuft, solange dieser Befehl läuft:"
-    echo "  ./crb agent"
-    return 0
-  fi
-  mkdir -p "$(dirname "$unit")"
-  cat > "$unit" <<UNIT
-[Unit]
-Description=claude-remote-box host agent ($dir)
-
-[Service]
-WorkingDirectory=$dir
-ExecStart=$dir/crb agent
-Restart=always
-RestartSec=5
-# Only the agent gets the signal, so a running push or merge finishes.
-KillMode=mixed
-TimeoutStopSec=120
-
-[Install]
-WantedBy=default.target
-UNIT
-  systemctl --user daemon-reload
-  systemctl --user enable "$AGENT_UNIT" >/dev/null 2>&1 || warn "Der Dienst ließ sich nicht aktivieren."
-  systemctl --user restart "$AGENT_UNIT" || die "Der Dienst ließ sich nicht starten. Siehe: journalctl --user -u $AGENT_UNIT"
-  echo ""
-  echo "✅ Der Agent läuft als Dienst $AGENT_UNIT."
-  echo "   Protokoll: journalctl --user -u $AGENT_UNIT -f"
-  if command -v loginctl >/dev/null 2>&1 && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
-    echo ""
-    warn "Dienste dieses Benutzers enden, wenn er sich abmeldet. Damit der Agent"
-    echo "   auch ohne Anmeldung und nach einem Neustart läuft:"
-    echo "   sudo loginctl enable-linger $(id -un)"
+    echo "🔑 Erzeuge den SSH-Schlüssel des Agenten..."
+    docker compose run --rm --no-deps -T crb-agent ssh-keygen -q -t ed25519 -N "" -C "crb-agent@$(uname -n)" -f "$dir/$key" </dev/null \
+      || die "Der Schlüssel ließ sich nicht erzeugen. Später erneut: ./crb agent install"
   fi
   echo ""
-  echo "Git braucht Zugangsdaten, die ohne Eingabe funktionieren (SSH-Schlüssel"
-  echo "ohne Passphrase oder ein Credential-Helper). Prüfen: ./crb git --list"
+  agent_print_key
+  echo ""
+  if confirm_yes "Schlüssel eingetragen? Zugriff jetzt prüfen (fetch aller Projekte)?"; then
+    docker compose run --rm --no-deps -T crb-agent ./crb git --list </dev/null || rc=$?
+    echo ""
+    if [ "$rc" -eq 0 ]; then
+      echo "✓ Der Agent erreicht origin aller Projekte."
+    else
+      warn "Nicht jedes Projekt ist erreichbar (siehe oben). Der Agent läuft trotzdem und versucht es bei jedem Fetch erneut."
+    fi
+  fi
+
+  echo ""
+  docker compose up -d crb-agent </dev/null || die "Der Container ließ sich nicht starten. Siehe: docker compose logs crb-agent"
+  echo ""
+  echo "✅ Der Agent läuft als Container crb-agent."
+  echo "   Protokoll: docker compose logs -f crb-agent"
+  echo "   Zustand:   ./crb agent status"
 }
 
 agent_uninstall() {
-  local unit=""
-  unit=$(agent_unit_file)
-  if ! agent_systemd || [ ! -f "$unit" ]; then echo "Kein Dienst $AGENT_UNIT installiert."; return 0; fi
-  systemctl --user disable --now "$AGENT_UNIT" >/dev/null 2>&1 || true
-  rm -f "$unit"
-  systemctl --user daemon-reload || true
-  echo "✅ Dienst $AGENT_UNIT entfernt. .env und $DASHBOARD_FILE bleiben, wie sie sind."
+  check_host
+  [ -f compose.yaml ] || die "Hier liegt keine compose.yaml. Bitte im Ordner der Installation ausführen."
+  if [ ! -f "$AGENT_FILE" ]; then echo "Kein Agent eingerichtet ($AGENT_FILE fehlt)."; return 0; fi
+  agent_by_crb || die "$AGENT_FILE ist nicht von crb angelegt. Bitte von Hand entfernen."
+  docker compose rm -s -f crb-agent </dev/null || warn "Der Container ließ sich nicht entfernen. Von Hand: docker compose rm -s -f crb-agent"
+  local backup tmp check
+  backup=$(mktemp -d)
+  cp -p compose.yaml "$backup/compose.yaml"
+  cp -p "$AGENT_FILE" "$backup/agent.yaml"
+  tmp=$(mktemp)
+  awk -v line="  - $AGENT_FILE" '$0 != line' compose.yaml > "$tmp"
+  cat "$tmp" > compose.yaml
+  rm -f "$tmp" "$AGENT_FILE"
+  if ! check=$(docker compose config -q 2>&1); then
+    echo "$check" >&2
+    cp -p "$backup/compose.yaml" compose.yaml
+    cp -p "$backup/agent.yaml" "$AGENT_FILE"
+    rm -rf "$backup"
+    die "Die Compose-Konfiguration ist ungültig. Die Dateien wurden wiederhergestellt."
+  fi
+  rm -rf "$backup"
+  echo "✅ Agent entfernt. .env und $AGENT_DIR/ (SSH-Schlüssel) bleiben."
+  echo "   Wird der Schlüssel nicht mehr gebraucht: bei GitHub löschen, dann rm -r $AGENT_DIR"
 }
 
 agent_status() {
   [ -f compose.yaml ] || die "Hier liegt keine compose.yaml. Bitte im Ordner der Installation ausführen."
-  local unit="" pid="" fetched="" link=""
-  unit=$(agent_unit_file)
-  if agent_systemd && [ -f "$unit" ]; then
-    echo "Dienst:    installiert, $(systemctl --user is-active "$AGENT_UNIT" 2>/dev/null || true)"
+  local state="" running=0 pid="" fetched="" link=""
+  if [ -f "$AGENT_FILE" ]; then
+    command -v docker >/dev/null 2>&1 || die "docker ist nicht installiert."
+    state=$(docker compose ps -a --format '{{.State}}' crb-agent 2>/dev/null </dev/null | head -n 1 || true)
+    echo "Container: crb-agent, ${state:-nicht angelegt}"
+    if [ "$state" = running ]; then running=1; fi
   else
-    echo "Dienst:    nicht installiert"
+    echo "Container: nicht eingerichtet"
   fi
   pid=$(agent_pid || true)
-  if [ -n "$pid" ]; then echo "Agent:     läuft (PID $pid)"; else echo "Agent:     läuft nicht"; fi
+  if [ -n "$pid" ]; then echo "Vordergrund: läuft (PID $pid)"; running=1; fi
   if [ -f "$AGENT_STATE" ]; then
     fetched=$(sed -n 's/^fetch=//p' "$AGENT_STATE"); link=$(sed -n 's/^link=//p' "$AGENT_STATE")
   fi
@@ -2405,11 +2596,21 @@ agent_status() {
     down) echo "Dashboard: nicht erreichbar" ;;
     *) echo "Dashboard: noch kein Kontakt" ;;
   esac
-  if [ -z "$pid" ]; then
+  if [ -f "$AGENT_DIR/.ssh/id_ed25519.pub" ]; then
+    echo "Schlüssel: $AGENT_DIR/.ssh/id_ed25519.pub (anzeigen: ./crb agent key)"
+  else
+    echo "Schlüssel: keiner"
+  fi
+  if [ "$running" -eq 0 ]; then
     echo ""
-    echo "Starten: ./crb agent install (als Dienst) oder ./crb agent (im Vordergrund)"
+    echo "Starten: ./crb agent install (als Container) oder ./crb agent (im Vordergrund)"
     exit 1
   fi
+}
+
+agent_key() {
+  [ -f "$AGENT_DIR/.ssh/id_ed25519.pub" ] || die "Der Agent hat noch keinen Schlüssel. Einrichten: ./crb agent install"
+  agent_print_key
 }
 
 cmd_agent() {
@@ -2419,6 +2620,7 @@ cmd_agent() {
     install) agent_install ;;
     uninstall) agent_uninstall ;;
     status) agent_status ;;
+    key) agent_key ;;
     *) usage >&2; exit 64 ;;
   esac
 }

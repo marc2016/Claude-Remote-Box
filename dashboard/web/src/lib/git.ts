@@ -1,4 +1,4 @@
-// Git actions: the state of the queue and the host agent, and queuing with
+// Git actions: the state of the queue and the agent, and queuing with
 // the passkey confirmation the server may ask for. The server side is
 // server/git.js; the dashboard itself never runs Git.
 import type { GitActionKind, GitState } from '@shared/types';
@@ -25,7 +25,7 @@ export type QueueOutcome = Awaited<ReturnType<typeof queueWithConfirm>>;
 /** What the page says when an action could not be queued. */
 export const QUEUE_MESSAGES: Record<Exclude<QueueOutcome, 'queued'>, string> = {
   unconfirmed: 'Die Aktion wurde nicht bestätigt.',
-  absent: 'Der Host-Agent antwortet nicht.',
+  absent: 'Der Git-Agent antwortet nicht.',
   limited: 'Zu viele offene Aktionen. Bitte warten, bis sie fertig sind.',
   'signed-out': 'Die Sitzung ist beendet. Bitte neu anmelden.',
   error: 'Das hat nicht geklappt. Bitte noch einmal versuchen.',

@@ -10,6 +10,7 @@ See proposal.md for the motivation. What shapes the approach:
 - The dashboard server is `node:http` without a framework; `POST /api/ingest` is authenticated with `CRB_STATUS_TOKEN`, which every box holds. Sessions are rows in `auth_sessions` with `created` and `last_used`. State-changing auth routes already require `Origin` equal to the public address and `Content-Type: application/json`.
 - The archived change `host-git-sync` excluded a host agent, a timer, and dashboard controls. This change reverses that on the user's decision.
 - Two facts are unverified on the Mini-PC: from which commit Claude Code starts a new session's worktree (archived `host-git-sync` task 1.1), and the installed Git version.
+- The user does not want anything installed on the host besides the installation directory: no service of the host user, no system package. Everything that runs permanently runs as a Compose service.
 
 ## Goals / Non-Goals
 
@@ -21,15 +22,15 @@ See proposal.md for the motivation. What shapes the approach:
 
 **Non-Goals:**
 - A general job runner, actions other than the six kinds, actions across projects.
-- Running the agent in a container, on another machine than the installation, or for several installations as one service.
-- Windows and macOS service managers. On macOS the agent runs in the foreground for development.
+- Running the agent on another machine than the installation, or for several installations as one service.
+- A service of the host user (systemd, launchd). `./crb agent` still runs in the foreground on any host, for development and the tests.
 - Live output of a running action; the dashboard shows the result when it is finished.
 
 ## Decisions
 
 ### D1: A pulling host agent instead of Git in the dashboard
 
-`crb agent` on the host asks the dashboard for work; the dashboard never calls the host. Alternatives: mounting the workspaces and a key into the dashboard (a flaw in an internet-facing service would then give write access to every repository and break the one-mount rule); a listening agent on the host that the dashboard calls (a new open port, and the container would need a route to the host). Pulling needs neither, works with the default bind to `127.0.0.1`, and keeps the direction of trust: the host decides what it runs.
+`crb agent` asks the dashboard for work; the dashboard never calls the host. Alternatives: mounting the workspaces and a key into the dashboard (a flaw in an internet-facing service would then give write access to every repository and break the one-mount rule); a listening agent on the host that the dashboard calls (a new open port, and the container would need a route to the host). Pulling needs neither and keeps the direction of trust: the side that holds the credential decides what it runs. Where the agent runs is D12: in its own container, not in the dashboard's.
 
 ### D2: The agent is a loop in `crb`, talking plain text over curl
 
@@ -40,11 +41,11 @@ The agent is `cmd_agent` in `crb`: no new runtime, and it calls the same functio
 
 The agent reads the line with `IFS=$'\t' read -r`, checks `kind` against a `case` list, the project against the services of the installation, and branch and name with `git check-ref-format --branch`, and passes them as separate arguments. Nothing is passed through `eval` or an unquoted expansion. The request to `next` is the heartbeat; no separate one.
 
-The base address is `http://` plus `CRB_DASHBOARD_BIND` from `.env` (default `127.0.0.1:8080`), with `0.0.0.0` replaced by `127.0.0.1`. It does not go through the reverse proxy.
+The base address is `CRB_AGENT_DASHBOARD` when set (the agent's container sets `http://crb-dashboard:8080`, the Compose network), else `http://` plus `CRB_DASHBOARD_BIND` from `.env` (default `127.0.0.1:8080`) with `0.0.0.0` replaced by `127.0.0.1`, for an agent in the foreground on the host. It never goes through the reverse proxy.
 
 ### D3: A separate token, and agent routes that refuse forwarded requests
 
-`CRB_STATUS_TOKEN` is in every box. A box that could use it on the agent routes could take actions out of the queue or report invented results. So the agent gets its own `CRB_AGENT_TOKEN`, which only `.env`, the dashboard service, and the host agent see. The two routes also refuse any request with `X-Forwarded-For` or `Forwarded`, as ingest does, without a switch to allow it: the agent is always on the same machine. Tokens are compared in constant time.
+`CRB_STATUS_TOKEN` is in every box. A box that could use it on the agent routes could take actions out of the queue or report invented results. So the agent gets its own `CRB_AGENT_TOKEN`, which only `.env`, the dashboard service, and the host agent see. The two routes also refuse any request with `X-Forwarded-For` or `Forwarded`, as ingest does, without a switch to allow it: the agent is always on the same machine, on the Compose network or on the host. Tokens are compared in constant time.
 
 A box can still reach the dashboard over the Compose network, but without the agent token it gets `401`, and queuing needs a passkey session, which a box cannot have.
 
@@ -108,19 +109,29 @@ With `CRB_DASHBOARD_AUTH=off` anyone who reaches the port could queue a push. Ac
 - The warning is its own function `gitStale(w, defaultBranch)` next to `gitStateParts`, because it is rendered apart from the other parts: first, with `TriangleAlert` and the warning color.
 - After an action the box keeps showing the state from before it until its next report (see Risks). `gitSettling(last, fetched_at, now)` detects this: every action starts with a fetch, so a report from after the action carries a fetch time later than the action's start. While it holds, at most one minute, the list offers no action and says that the new state is on its way.
 
-### D12: Service
+### D12: The agent runs in its own container
 
-`crb agent install` writes `~/.config/systemd/user/crb-agent.service` (`WorkingDirectory=<installation>`, `ExecStart=<installation>/crb agent`, `Restart=always`, `RestartSec=5`), then `systemctl --user daemon-reload` and `enable --now`. Lingering is checked with `loginctl show-user`; when it is off, the command `sudo loginctl enable-linger <user>` is printed, not run, because `crb` never calls `sudo`. An existing unit with another `WorkingDirectory` is left alone.
+`crb agent install` writes `services/crb-agent.yaml` (first line `# Created by crb.`), lists it under `include:` in `compose.yaml`, and starts it with `docker compose up -d crb-agent`. Nothing is installed on the host. Alternatives: a systemd service of the host user (the first implementation; rejected by the user: it installs something on the host, needs lingering, and differs per host); running the agent inside the dashboard container (rejected in D1); inside a box (a box is where Claude runs, it must not hold push credentials).
 
-A single instance is enforced with a lock directory `.crb-agent.lock` holding the PID; a lock whose PID is gone is taken over. The agent writes `.crb-agent.state` (time of the last fetch round, result of the last request) for `crb agent status`. Both are in the installation directory and in `.gitignore`.
+The service:
 
-Picking up a new script: the loop compares the checksum of the script file with the one at start (`cksum`, which is the same on GNU and BSD, unlike `stat`) and, between two actions and only when `bash -n` accepts the new file, runs `exec` on it. `exec` keeps the PID, so the lock, which holds the PID, stays valid without a handover.
+- Image `ghcr.io/marc2016/claude-remote-box-agent`, built and released with the other two from `agent/Dockerfile`: Debian slim with `bash`, `git`, `curl`, `openssh-client`, `ca-certificates`, and `libnss-wrapper`. It holds no copy of `crb`: the container runs the `crb` of the mounted installation directory, so an update of the script reaches the agent through the existing re-exec without a new image.
+- `user: "${UID:-1000}:${GID:-1000}"` as the boxes, so every file Git writes belongs to the host user. OpenSSH refuses a UID without a passwd entry; the entrypoint therefore writes a passwd and a group line to `/tmp` and preloads `libnss_wrapper` when `getent passwd` finds none.
+- `cap_drop: [ALL]`, `no-new-privileges`, `read_only: true` with a `tmpfs` for `/tmp`, `init: true` (signals reach the agent, which is not PID 1), `hostname: crb-agent`, `restart: unless-stopped`, `stop_grace_period: 120s` (a running push or merge finishes). No port.
+- Mounts: the installation directory at its own absolute path, so every path `crb git` derives (workspaces, worktrees) is the same inside and outside; every workspace outside it at its own path too; `./crb-agent` at `/agent`, the agent's home (`HOME=/agent`) with its SSH key and `known_hosts`. `~/` workspace paths resolve against `CRB_HOST_HOME`, the host user's home written into the file.
+- Environment: `CRB_AGENT_DASHBOARD`; no token (the agent reads `CRB_AGENT_TOKEN` from the mounted `.env` as before, so `docker compose config` shows it for the dashboard only); `GIT_AUTHOR_*`/`GIT_COMMITTER_*` from the host's `git config --global` at install time (asked when empty; a merge commit needs them), `GIT_SSH_COMMAND` with `BatchMode=yes` and `StrictHostKeyChecking=accept-new` (the first contact records the host key), and `GIT_CONFIG_COUNT` entries that rewrite `https://<host>/` to `git@<host>:` for every host whose `origin` is an HTTPS URL, so one key serves every project without changing a repository's configuration.
 
-The unit sets `KillMode=mixed`: only the agent gets the termination signal, so a running push or merge is not killed with it, and the agent ends after reporting.
+Credentials (the user's choice): the agent has its own Ed25519 key without passphrase in `./crb-agent/.ssh/`, generated inside the container by `install` when missing (`docker compose run --rm --no-deps crb-agent ssh-keygen ...`), so the host needs no `ssh-keygen`. `install` and `crb agent key` print the public key and where to register it: as an SSH key of the GitHub account (or of a machine user), because a GitHub deploy key is accepted by one repository only. Revoking it there cuts the agent off without touching the user's own access. After the user confirms the registration, `install` checks it by running `./crb git --list` in the container.
+
+`install` is repeatable: it rewrites a service file created by `crb` (new projects outside the installation directory get their mount), keeps the key, and never touches a hand-written one. `crb add` prints the hint to repeat it when an agent service exists and the new workspace is outside the installation directory. A project whose workspace the container cannot see is logged once per round as not mounted, with that hint. `uninstall` stops and removes the service, removes its `include:` line and the file, and keeps `.env` and `./crb-agent` (the key). `status` reads the container state from `docker compose ps` and the state file.
+
+A single instance is enforced with a lock directory `.crb-agent.lock` holding the PID and the host name (`uname -n`). The lock is taken over when it was written on this host name and its PID is gone or is the agent's own; the fixed `hostname: crb-agent` makes a recreated container recognize its predecessor's lock. A lock from another host name (an agent in the foreground on the host while the container runs, or the reverse) is refused with both names. The agent writes `.crb-agent.state` (time of the last fetch round, result of the last request) for `crb agent status`. Both are in the installation directory and in `.gitignore`.
+
+Picking up a new script: the loop compares the checksum of the script file with the one at start (`cksum`, which is the same on GNU and BSD, unlike `stat`) and, between two actions and only when `bash -n` accepts the new file, runs `exec` on it. `exec` keeps the PID, so the lock, which holds the PID, stays valid without a handover. The directory is mounted, not the file, so a replaced file is visible in the container.
 
 Two environment variables exist for the tests only: `CRB_AGENT_FETCH_SECONDS` (the interval in seconds) and `CRB_AGENT_PAUSE_MAX` (caps every pause).
 
-Git needs credentials that work without a terminal: a key without a passphrase or a credential helper, as for cron and the phone shortcut. `GIT_TERMINAL_PROMPT=0` and `BatchMode=yes` are set as in `cmd_git`, so a missing credential is a failed fetch in the log, not a hanging agent.
+`GIT_TERMINAL_PROMPT=0` and `BatchMode=yes` are set, so a missing or unregistered key is a failed fetch in the log, not a hanging agent.
 
 ## Risks / Trade-offs
 
@@ -130,15 +141,17 @@ Git needs credentials that work without a terminal: a key without a passphrase o
 - [The dashboard's offer is older than the repository's state] → the agent fetches and rescans before every action and refuses with the reason.
 - [The page shows the old state after a successful action until the box's next report] → the watcher sends the `git` event with its heartbeat, every 30 s; in the local run of task 4.6 the new state arrived 21 s after the outcome. The result line is shown at once and stays until dismissed, and the controls are withheld until the report is in (D11, `gitSettling`), so a second tap on a stale "pushen" cannot happen.
 - [The agent is not running and nobody notices] → the notice above the cards after 90 s.
-- [Git older than 2.38 on the host] → checked first (task 1.2); `merge` refuses with the version.
+- [Git older than 2.38] → the agent image brings its own Git (2.47); only `crb git merge` typed on the host depends on the host's Git, and refuses with the version.
 - [Fresh branches may not influence where sessions start] → checked first (task 1.1), see D7.
-- [Service of the host user without lingering stops at logout] → `install` and `status` say so with the command.
+- [The agent's key can push to every repository of the account] → it lives only in `./crb-agent/.ssh` (mode 700, not in any box, not in the dashboard), and is revoked on GitHub on its own. A machine user with access to the projects limits it further; the README says how.
+- [`accept-new` trusts the first host key it sees] → the same as a first `git clone` by hand; a changed key later fails the fetch.
+- [A workspace outside the installation directory added after `install` is not mounted] → logged per round with the hint, and `crb add` prints it.
 
 ## Migration Plan
 
-1. Release both images and `crb` together; the dashboard without an agent token behaves as before plus the warning.
-2. `./crb update` adds `CRB_AGENT_TOKEN` to the dashboard service; `./crb agent install` creates the token and the service.
-3. Rollback: `./crb agent uninstall`; the dashboard then shows no actions once the agent has been absent, and `crb git` works as before. The table `git_actions` is ignored by an older dashboard.
+1. Release the three images and `crb` together; the dashboard without an agent token behaves as before plus the warning.
+2. `./crb update` adds `CRB_AGENT_TOKEN` to the dashboard service; `./crb agent install` creates the token, the key, and the agent's service.
+3. Rollback: `./crb agent uninstall` (the key stays in `./crb-agent`); the dashboard then shows no actions once the agent has been absent, and `crb git` works as before. The table `git_actions` is ignored by an older dashboard.
 
 ## Open Questions
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Lets the signed-in user trigger Git actions for a box from the dashboard, which queues them for the host agent and shows what became of them, and warns when a session's branch has fallen behind the default branch or when the agent is absent.
+Lets the signed-in user trigger Git actions for a box from the dashboard, which queues them for the agent and shows what became of them, and warns when a session's branch has fallen behind the default branch or when the agent is absent.
 
 ## ADDED Requirements
 
@@ -49,7 +49,7 @@ Queuing SHALL require a valid session, a request that comes from the page at the
 - **THEN** posting an action is answered with `403` and the page shows no action control
 
 ### Requirement: Agent access
-The dashboard SHALL offer the host agent one way to collect the next queued action and one way to report an outcome, both authenticated with `Authorization: Bearer <CRB_AGENT_TOKEN>`. It SHALL answer `401` for any other value, including `CRB_STATUS_TOKEN`, and for every request while its own agent token is empty. It SHALL refuse with `403` a request to these two that carries an `X-Forwarded-For` or `Forwarded` header, so that they cannot be reached through the reverse proxy. Collecting SHALL hand out each action once, the oldest queued one first, and SHALL mark it as running. A request to collect MAY be held open for up to 25 seconds while nothing is queued. Neither way SHALL be usable with a session cookie.
+The dashboard SHALL offer the agent one way to collect the next queued action and one way to report an outcome, both authenticated with `Authorization: Bearer <CRB_AGENT_TOKEN>`. It SHALL answer `401` for any other value, including `CRB_STATUS_TOKEN`, and for every request while its own agent token is empty. It SHALL refuse with `403` a request to these two that carries an `X-Forwarded-For` or `Forwarded` header, so that they cannot be reached through the reverse proxy. Collecting SHALL hand out each action once, the oldest queued one first, and SHALL mark it as running. A request to collect MAY be held open for up to 25 seconds while nothing is queued. Neither way SHALL be usable with a session cookie.
 
 #### Scenario: Collected once
 - **WHEN** one action is queued and the agent collects twice
@@ -87,7 +87,7 @@ An action SHALL be in exactly one of the states queued, running, done, refused, 
 - **THEN** it is rejected and the stored outcome is unchanged
 
 ### Requirement: Agent state
-The dashboard SHALL treat the agent as present while its last request to collect is younger than 90 seconds, and as absent otherwise. `GET /api/git` SHALL carry whether an agent was ever seen, whether it is present, and the time of its last request. While the agent is absent after having been seen, the page SHALL show, above the cards, that the host agent does not answer, with the command `./crb agent status`, and SHALL offer no action. When no agent was ever seen, the page SHALL show no such notice on the card list and SHALL show, in place of the actions in the detail view, that actions need the host agent and the command `./crb agent install`.
+The dashboard SHALL treat the agent as present while its last request to collect is younger than 90 seconds, and as absent otherwise. `GET /api/git` SHALL carry whether an agent was ever seen, whether it is present, and the time of its last request. While the agent is absent after having been seen, the page SHALL show, above the cards, that the agent does not answer, with the command `./crb agent status`, and SHALL offer no action. When no agent was ever seen, the page SHALL show no such notice on the card list and SHALL show, in place of the actions in the detail view, that actions need the agent and the command `./crb agent install`.
 
 #### Scenario: Agent stops
 - **WHEN** the agent stops and 90 seconds pass

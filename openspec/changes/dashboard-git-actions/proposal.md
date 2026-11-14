@@ -6,7 +6,7 @@ The dashboard shows how every checkout stands against `origin`, but acting on it
 
 ## What Changes
 
-- A **host agent**, `crb agent`, a process on the host that fetches every project at a fixed interval, collects the Git actions queued in the dashboard, runs them with the host user's Git credentials, and reports each result back. `crb agent install` sets it up as a service of the host user.
+- An **agent**, `crb agent`, that fetches every project at a fixed interval, collects the Git actions queued in the dashboard, runs them, and reports each result back. It runs as its own Compose service `crb-agent` next to the dashboard, with the installation directory mounted and its own SSH key; nothing is installed on the host. `crb agent install` sets it up and prints the key to register with GitHub.
 - **Git actions in the dashboard**: push a branch, pull (fast-forward) a branch, synchronize a project, fetch a project now, merge a branch into the default branch and push it, and create a branch and check it out in the workspace. Each action is queued, shown with its state, and ends with the agent's result or the reason it was refused.
 - **Merge into the default branch** in one step: the merge is computed without a working tree, pushed, and only then applied locally. A conflict or a rejected push leaves everything as it was.
 - **Create a branch**: a new branch from `origin`'s default branch, checked out in the workspace; when the workspace's default branch has commits that are not on `origin`, they can be taken along onto the new branch, which puts the default branch back to `origin`'s state.
@@ -23,7 +23,7 @@ Assumptions taken from the exploration without an explicit answer, to be confirm
 ## Capabilities
 
 ### New Capabilities
-- `host-agent`: the process on the host that fetches at an interval and carries out the actions queued in the dashboard, how it authenticates, how it is installed as a service, and what it never does.
+- `host-agent`: the agent that fetches at an interval and carries out the actions queued in the dashboard, how it authenticates to the dashboard and to `origin`, how it is set up as a Compose service, and what it never does.
 - `dashboard-git-actions`: queuing Git actions in the dashboard, who may queue them, the life of an action from queued to result, the controls on the cards and in the detail view, and the warnings for a stale session branch and an absent agent.
 
 ### Modified Capabilities
@@ -35,11 +35,12 @@ Assumptions taken from the exploration without an explicit answer, to be confirm
 
 ## Impact
 
-- `crb`: new subcommand `agent` (`install`, `uninstall`, `status`), new single actions under `git`, the merge and branch rules, the token in `.env` and in the generated dashboard service, `update` reconciliation. Needs Git 2.38 or newer on the host for the merge.
+- `crb`: new subcommand `agent` (`install`, `uninstall`, `status`, `key`), the generated `services/crb-agent.yaml`, new single actions under `git`, the merge and branch rules, the token in `.env` and in the generated dashboard service, `update` reconciliation. `crb git merge` on the host needs Git 2.38 or newer there; the agent brings its own.
 - `crb-watch.js`: one new field per checkout in the `git` event.
 - `dashboard/server`: a job table, routes for queuing and for the agent, the recency rule for sessions, pruning.
 - `dashboard/web`: action controls, confirmation dialogs, action state, the two warnings.
+- A third image, `claude-remote-box-agent` (`agent/Dockerfile`), in the image workflow and `release.sh`.
 - `services/crb-dashboard.yaml` (generated), `compose.example.yaml`, `.env`: `CRB_AGENT_TOKEN`.
 - `README.md`: a section on the agent and the actions, the Git workflow section, the security model (the dashboard can now publish commits).
 - Tests: `tests/crb.test.sh`, `tests/watch.test.sh`, `dashboard/test/*`.
-- Open field work this change depends on: the worktree finding of the archived `host-git-sync` task 1.1 (from which commit a new session's worktree starts) and the Git version on the Mini-PC.
+- Open field work this change depends on: the worktree finding of the archived `host-git-sync` task 1.1 (from which commit a new session's worktree starts) and the Git version on the Mini-PC (only for `crb git merge` typed there).

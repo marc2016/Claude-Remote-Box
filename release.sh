@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Release manager: tests, version bump, commit, tag, push. The tag vX.Y.Z makes
-# the image workflow publish both images (box and dashboard) as X.Y.Z and latest.
+# the image workflow publish the three images (box, dashboard, agent) as X.Y.Z and latest.
 #
 #   ./release.sh                 asks for patch / minor / major or a version
 #   ./release.sh 0.4.0           releases that version
@@ -104,12 +104,12 @@ echo "✍️  2/3 Setze Version v$TARGET..."
 FILES=(README.md compose.example.yaml dashboard/package.json dashboard/package-lock.json)
 if [ "$DRY" -eq 1 ]; then
   echo "   würde ändern: ${FILES[*]}"
-  grep -n -E "claude-remote-box(-dashboard)?:$DOC_VER|CRB_VERSION=$DOC_VER|\`$DOC_VER\`" README.md compose.example.yaml | sed 's/^/   /'
+  grep -n -E "claude-remote-box(-dashboard|-agent)?:$DOC_VER|CRB_VERSION=$DOC_VER|\`$DOC_VER\`" README.md compose.example.yaml | sed 's/^/   /'
 else
   # Image tags and version examples in the docs (not the "Upgrading to" history).
   if [ -n "$DOC_VER" ]; then
     sed -i.bak -E \
-      -e "s#(claude-remote-box(-dashboard)?:)$DOC_VER#\1$TARGET#g" \
+      -e "s#(claude-remote-box(-dashboard|-agent)?:)$DOC_VER#\1$TARGET#g" \
       -e "s#CRB_VERSION=$DOC_VER#CRB_VERSION=$TARGET#g" \
       -e "s#(for example )\`$DOC_VER\`#\1\`$TARGET\`#g" \
       -e "s#^\| \`$DOC_VER\` \| One release#| \`$TARGET\` | One release#" \
